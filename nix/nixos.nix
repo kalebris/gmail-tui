@@ -14,6 +14,19 @@ let
       pkgs.writeText "gmail-tui-keys" (renderKeys cfg.keys)
     else
       null;
+  profileNameOk =
+    name:
+    name != ""
+    && name != "."
+    && name != ".."
+    && !(lib.hasInfix "/" name)
+    && !(lib.hasInfix "\\" name);
+  profileAliases = lib.listToAttrs (
+    map (name: {
+      name = "gmail-tui-${name}";
+      value = "${lib.getExe cfg.package} --profile ${lib.escapeShellArg name}";
+    }) cfg.profiles
+  );
 in
 {
   options.programs.gmail-tui = {
@@ -24,6 +37,20 @@ in
       default = pkgs.gmail-tui or (throw "programs.gmail-tui.package: set this, or apply gmail-tui.overlays.default");
       defaultText = lib.literalExpression "pkgs.gmail-tui";
       description = "gmail-tui package to install.";
+    };
+
+    profiles = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [
+        "work"
+        "home"
+      ];
+      description = ''
+        Named mail stores under the configured data directory. For each name,
+        a shell alias <literal>gmail-tui-&lt;name&gt;</literal> runs
+        <command>gmail-tui --profile &lt;name&gt;</command>.
+      '';
     };
 
     keys = lib.mkOption {
@@ -55,9 +82,15 @@ in
         assertion = cfg.keysFile == null || cfg.keys == { };
         message = "programs.gmail-tui: set keys or keysFile, not both";
       }
+      {
+        assertion = lib.all profileNameOk cfg.profiles;
+        message = "programs.gmail-tui.profiles: each entry must be a single directory name (no slashes)";
+      }
     ];
 
     environment.systemPackages = [ cfg.package ];
+
+    environment.shellAliases = lib.mkIf (cfg.profiles != [ ]) profileAliases;
 
     environment.variables = lib.mkIf (keysPackage != null) {
       GMAIL_TUI_KEYS = "${keysPackage}";

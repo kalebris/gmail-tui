@@ -125,6 +125,9 @@ Package-only (no module / no managed keys):
 
   programs.gmail-tui = {
     enable = true;
+    # Shell aliases: gmail-tui-work → gmail-tui --profile work
+    # (shared config/keys; separate mail store under <data>/work/).
+    profiles = [ "work" "home" ];
     # Writes ~/.config/gmail-tui/keys (overrides only).
     keys = {
       archive = [ "e" ];
