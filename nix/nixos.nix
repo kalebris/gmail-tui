@@ -21,12 +21,12 @@ let
     && name != ".."
     && !(lib.hasInfix "/" name)
     && !(lib.hasInfix "\\" name);
-  profileAliases = lib.listToAttrs (
-    map (name: {
-      name = "gmail-tui-${name}";
-      value = "${lib.getExe cfg.package} --profile ${lib.escapeShellArg name}";
-    }) cfg.profiles
-  );
+  profilePackages = map (
+    name:
+    pkgs.writeShellScriptBin "gmail-tui-${name}" ''
+      exec ${lib.getExe cfg.package} --profile ${lib.escapeShellArg name} "$@"
+    ''
+  ) cfg.profiles;
 in
 {
   options.programs.gmail-tui = {
@@ -48,7 +48,8 @@ in
       ];
       description = ''
         Named mail stores under the configured data directory. For each name,
-        a shell alias <literal>gmail-tui-&lt;name&gt;</literal> runs
+        installs <command>gmail-tui-&lt;name&gt;</command> on
+        <envar>PATH</envar> as a wrapper around
         <command>gmail-tui --profile &lt;name&gt;</command>.
       '';
     };
@@ -88,9 +89,7 @@ in
       }
     ];
 
-    environment.systemPackages = [ cfg.package ];
-
-    environment.shellAliases = lib.mkIf (cfg.profiles != [ ]) profileAliases;
+    environment.systemPackages = [ cfg.package ] ++ profilePackages;
 
     environment.variables = lib.mkIf (keysPackage != null) {
       GMAIL_TUI_KEYS = "${keysPackage}";

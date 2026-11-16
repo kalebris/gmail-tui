@@ -127,7 +127,7 @@ Package-only (no module / no managed keys):
     enable = true;
     # Writes data … into ~/.config/gmail-tui/config (mail store root).
     storeDir = "${config.home.homeDirectory}/mail/gmail-tui";
-    # Shell aliases: gmail-tui-work → gmail-tui --profile work
+    # PATH wrappers: gmail-tui-work → gmail-tui --profile work
     # (shared config/keys; separate store under <storeDir>/work/).
     profiles = [ "work" "home" ];
     # Extra lines for the managed config (optional).

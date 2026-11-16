@@ -15,12 +15,14 @@ let
     && name != ".."
     && !(lib.hasInfix "/" name)
     && !(lib.hasInfix "\\" name);
-  profileAliases = lib.listToAttrs (
-    map (name: {
-      name = "gmail-tui-${name}";
-      value = "${lib.getExe cfg.package} --profile ${lib.escapeShellArg name}";
-    }) cfg.profiles
-  );
+  # Real PATH wrappers beat shell aliases: aliases only appear after HM
+  # regenerates bashrc/zshrc and a new interactive shell starts.
+  profilePackages = map (
+    name:
+    pkgs.writeShellScriptBin "gmail-tui-${name}" ''
+      exec ${lib.getExe cfg.package} --profile ${lib.escapeShellArg name} "$@"
+    ''
+  ) cfg.profiles;
 in
 {
   options.programs.gmail-tui = {
@@ -73,9 +75,10 @@ in
       ];
       description = ''
         Named mail stores under <option>storeDir</option> (or the default store).
-        For each name, a shell alias <literal>gmail-tui-&lt;name&gt;</literal>
-        runs <command>gmail-tui --profile &lt;name&gt;</command>. Config and keys
-        stay shared; only the mail index and tokens are separated.
+        For each name, installs <command>gmail-tui-&lt;name&gt;</command> on
+        <envar>PATH</envar> as a small wrapper around
+        <command>gmail-tui --profile &lt;name&gt;</command>. Config and keys stay
+        shared; only the mail index and tokens are separated.
       '';
     };
 
@@ -119,9 +122,7 @@ in
       }
     ];
 
-    home.packages = [ cfg.package ];
-
-    home.shellAliases = lib.mkIf (cfg.profiles != [ ]) profileAliases;
+    home.packages = [ cfg.package ] ++ profilePackages;
 
     xdg.configFile."gmail-tui/config" = lib.mkIf (cfg.storeDir != null) {
       text = ''
