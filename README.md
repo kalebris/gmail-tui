@@ -66,38 +66,113 @@ Login asks for Gmail modify plus full Calendar access (list calendars, view/crea
 
 Google may show a “This app hasn’t been verified” warning for your unpublished client — that is expected until you publish and verify the consent screen.
 
-## Nix flake (use as a package)
+## Nix flake
 
-Add this repo as a flake input and put `gmail-tui` on your PATH.
+Flake URL: [`github:kalebris/gmail-tui`](https://github.com/kalebris/gmail-tui)
+(`git+ssh://…` or `path:./gmail-tui` also work). Outputs:
 
-### NixOS config
+| Output | Use |
+| --- | --- |
+| `overlays.default` | Adds `pkgs.gmail-tui` |
+| `packages.<system>.default` | The package |
+| `homeModules.default` | Home Manager: `programs.gmail-tui` |
+| `nixosModules.default` | NixOS: `programs.gmail-tui` (keys via `GMAIL_TUI_KEYS`) |
+
+### Home Manager (recommended)
+
+Import the module **and** apply the overlay (required when Home Manager does not
+use the system `pkgs`, e.g. `useGlobalPkgs = false`).
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    home-manager.url = "github:nix-community/home-manager";
+    gmail-tui.url = "github:kalebris/gmail-tui";
+  };
+  # … wire inputs.gmail-tui into your HM user module as usual …
+}
+```
+
+```nix
+# homes/you/gmail-tui.nix (or inline in the HM user module)
+{ config, inputs, ... }:
+{
+  imports = [
+    inputs.gmail-tui.homeModules.default
+    # Optional: decrypt OAuth client JSON with agenix (home module).
+    inputs.agenix.homeManagerModules.default
+  ];
+  nixpkgs.overlays = [ inputs.gmail-tui.overlays.default ];
+
+  age.secrets.gmail-tui-client.file = ../../secrets/gmail-tui-client.age;
+
+  programs.gmail-tui = {
+    enable = true;
+
+    # Optional: write `data …` into ~/.config/gmail-tui/config (mail store root).
+    # storeDir = "${config.home.homeDirectory}/mail/gmail-tui";
+
+    # PATH wrappers: gmail-tui-work / gmail-tui-home.
+    # Shared config + keys; separate index/tokens under <data>/<profile>/.
+    profiles = [ "work" "home" ];
+
+    # Decrypted Google Desktop OAuth client JSON (string path — not a Nix path).
+    # Installs gmail-tui-login and gmail-tui-<profile>-login on PATH.
+    clientJson = config.age.secrets.gmail-tui-client.path;
+
+    # Optional managed config lines (only when storeDir is set):
+    # extraConfig = ''
+    #   account ada@example.com
+    # '';
+
+    # Optional key overrides → ~/.config/gmail-tui/keys
+    # keys = { archive = [ "e" ]; };
+    # Or a full file: keysFile = ./gmail-tui-keys;
+  };
+}
+```
+
+After `home-manager switch` / `nixos-rebuild switch` (with HM as a NixOS
+module), you get binaries on `PATH`:
+
+```bash
+gmail-tui                 # default store
+gmail-tui-work            # → gmail-tui --profile work
+gmail-tui-home            # → gmail-tui --profile home
+gmail-tui-login           # → gmail-tui login --client-json <clientJson>
+gmail-tui-work-login      # → gmail-tui --profile work login --client-json …
+gmail-tui-home-login      # → gmail-tui --profile home login --client-json …
+```
+
+Same as running `gmail-tui --profile work` yourself. Login once per profile
+(tokens live under that profile’s store). `clientJson` is optional; without it
+only the profile wrappers are installed.
+
+### NixOS (system package + keys)
 
 ```nix
 # in your flake.nix
 {
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    gmail-tui.url = "github:YOUR_USER/gmail-tui"; # git+ssh://… or path:./gmail-tui also fine
-  };
+  inputs.gmail-tui.url = "github:kalebris/gmail-tui";
 
-  outputs = { self, nixpkgs, gmail-tui, ... }: {
+  outputs = { nixpkgs, gmail-tui, ... }: {
     nixosConfigurations.you = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
         gmail-tui.nixosModules.default
         ({ pkgs, ... }: {
           nixpkgs.overlays = [ gmail-tui.overlays.default ];
-
           programs.gmail-tui = {
             enable = true;
-            # Portable shortcuts: written to the Nix store and selected via
-            # GMAIL_TUI_KEYS. Only list overrides; other actions keep defaults.
+            # Portable shortcuts in the Nix store; selected via GMAIL_TUI_KEYS.
             keys = {
               archive = [ "e" ];
               down = [ "j" "down" ];
               inbox = [ "g-i" ];
             };
-            # Or ship a full file: keysFile = ./gmail-tui-keys;
+            # Or: keysFile = ./gmail-tui-keys;
           };
         })
       ];
@@ -115,48 +190,15 @@ Package-only (no module / no managed keys):
 })
 ```
 
-### Home Manager
+You can also point any install at a keys file with `GMAIL_TUI_KEYS=/path/to/keys`
+or `gmail-tui --keys ./keys`.
 
-```nix
-{ config, inputs, pkgs, ... }:
-{
-  imports = [ inputs.gmail-tui.homeModules.default ];
-  nixpkgs.overlays = [ inputs.gmail-tui.overlays.default ];
-
-  programs.gmail-tui = {
-    enable = true;
-    # Writes data … into ~/.config/gmail-tui/config (mail store root).
-    storeDir = "${config.home.homeDirectory}/mail/gmail-tui";
-    # PATH wrappers: gmail-tui-work → gmail-tui --profile work
-    # (shared config/keys; separate store under <storeDir>/work/).
-    profiles = [ "work" "home" ];
-    # Extra lines for the managed config (optional).
-    # extraConfig = ''
-    #   account ada@example.com
-    # '';
-    # Writes ~/.config/gmail-tui/keys (overrides only).
-    keys = {
-      archive = [ "e" ];
-      down = [ "j" "down" ];
-      inbox = [ "g-i" ];
-    };
-    # Or ship a full file: keysFile = ./gmail-tui-keys;
-  };
-}
-```
-
-You can also point any install at a keys file with `GMAIL_TUI_KEYS=/path/to/keys` or `gmail-tui --keys ./keys`.
-
-One-off without editing your system flake:
+### One-off / local checkout
 
 ```bash
-nix run github:YOUR_USER/gmail-tui -- --help
-nix profile install github:YOUR_USER/gmail-tui
-```
+nix run github:kalebris/gmail-tui -- --help
+nix profile install github:kalebris/gmail-tui
 
-Local checkout:
-
-```bash
 nix build .#gmail-tui    # ./result/bin/gmail-tui
 nix run . -- login --client-json ~/.config/gmail-tui/client_secret.json
 ```
@@ -193,7 +235,11 @@ pip install -e .
 ## Quick usage
 
 ```bash
-gmail-tui                 # interactive TUI
+gmail-tui                 # interactive TUI (default store)
+gmail-tui-work            # same, with --profile work (Home Manager profiles=)
+gmail-tui-home            # same, with --profile home
+gmail-tui-login           # OAuth login using programs.gmail-tui.clientJson
+gmail-tui-work-login      # login into the work profile store
 gmail-tui sync            # refresh local index / bodies
 gmail-tui list            # print local index
 gmail-tui search QUERY

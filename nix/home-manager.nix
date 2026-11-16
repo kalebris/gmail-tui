@@ -15,14 +15,28 @@ let
     && name != ".."
     && !(lib.hasInfix "/" name)
     && !(lib.hasInfix "\\" name);
+  exe = lib.getExe cfg.package;
   # Real PATH wrappers beat shell aliases: aliases only appear after HM
   # regenerates bashrc/zshrc and a new interactive shell starts.
   profilePackages = map (
     name:
     pkgs.writeShellScriptBin "gmail-tui-${name}" ''
-      exec ${lib.getExe cfg.package} --profile ${lib.escapeShellArg name} "$@"
+      exec ${exe} --profile ${lib.escapeShellArg name} "$@"
     ''
   ) cfg.profiles;
+  loginPackages = lib.optionals (cfg.clientJson != null) (
+    [
+      (pkgs.writeShellScriptBin "gmail-tui-login" ''
+        exec ${exe} login --client-json ${lib.escapeShellArg cfg.clientJson} "$@"
+      '')
+    ]
+    ++ map (
+      name:
+      pkgs.writeShellScriptBin "gmail-tui-${name}-login" ''
+        exec ${exe} --profile ${lib.escapeShellArg name} login --client-json ${lib.escapeShellArg cfg.clientJson} "$@"
+      ''
+    ) cfg.profiles
+  );
 in
 {
   options.programs.gmail-tui = {
@@ -44,7 +58,7 @@ in
         tokens). When set, Home Manager writes
         <filename>~/.config/gmail-tui/config</filename> with a
         <literal>data</literal> line (the gmail-tui setting name) so
-        <command>gmail-tui</command> and <option>profiles</option> aliases use
+        <command>gmail-tui</command> and <option>profiles</option> wrappers use
         this path without <command>--data</command>. <literal>~</literal> is
         expanded by gmail-tui.
       '';
@@ -63,6 +77,21 @@ in
         <filename>~/.config/gmail-tui/config</filename> when
         <option>programs.gmail-tui.storeDir</option> is set (account order,
         download path, date formats, …).
+      '';
+    };
+
+    clientJson = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = lib.literalExpression "config.age.secrets.gmail-tui-client.path";
+      description = ''
+        Path to a Google Desktop OAuth client JSON (often an agenix-decrypted
+        secret). When set, installs <command>gmail-tui-login</command> and, for
+        each <option>profiles</option> entry,
+        <command>gmail-tui-&lt;name&gt;-login</command> on <envar>PATH</envar>,
+        which run <command>login --client-json</command> against that file.
+        Use a string path (not a Nix path) so the secret is not copied into the
+        store.
       '';
     };
 
@@ -122,7 +151,7 @@ in
       }
     ];
 
-    home.packages = [ cfg.package ] ++ profilePackages;
+    home.packages = [ cfg.package ] ++ profilePackages ++ loginPackages;
 
     xdg.configFile."gmail-tui/config" = lib.mkIf (cfg.storeDir != null) {
       text = ''
