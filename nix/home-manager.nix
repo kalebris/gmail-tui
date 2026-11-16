@@ -33,16 +33,18 @@ in
       description = "gmail-tui package to install.";
     };
 
-    data = lib.mkOption {
+    storeDir = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
       example = lib.literalExpression ''"''${config.home.homeDirectory}/mail/gmail-tui"'';
       description = ''
-        Mail index and body-cache directory. When set, Home Manager writes
+        Directory for the local mail store (SQLite index, body cache, OAuth
+        tokens). When set, Home Manager writes
         <filename>~/.config/gmail-tui/config</filename> with a
-        <literal>data</literal> line so <command>gmail-tui</command> (and
-        <option>profiles</option> aliases) use this store without
-        <command>--data</command>. <literal>~</literal> is expanded by gmail-tui.
+        <literal>data</literal> line (the gmail-tui setting name) so
+        <command>gmail-tui</command> and <option>profiles</option> aliases use
+        this path without <command>--data</command>. <literal>~</literal> is
+        expanded by gmail-tui.
       '';
     };
 
@@ -57,8 +59,8 @@ in
       description = ''
         Extra lines appended to the managed
         <filename>~/.config/gmail-tui/config</filename> when
-        <option>programs.gmail-tui.data</option> is set (account order, download
-        path, date formats, …).
+        <option>programs.gmail-tui.storeDir</option> is set (account order,
+        download path, date formats, …).
       '';
     };
 
@@ -70,10 +72,10 @@ in
         "home"
       ];
       description = ''
-        Named mail stores under the configured data directory. For each name,
-        a shell alias <literal>gmail-tui-&lt;name&gt;</literal> runs
-        <command>gmail-tui --profile &lt;name&gt;</command>. Config and keys stay
-        shared; only the mail index and tokens are separated.
+        Named mail stores under <option>storeDir</option> (or the default store).
+        For each name, a shell alias <literal>gmail-tui-&lt;name&gt;</literal>
+        runs <command>gmail-tui --profile &lt;name&gt;</command>. Config and keys
+        stay shared; only the mail index and tokens are separated.
       '';
     };
 
@@ -121,10 +123,10 @@ in
 
     home.shellAliases = lib.mkIf (cfg.profiles != [ ]) profileAliases;
 
-    xdg.configFile."gmail-tui/config" = lib.mkIf (cfg.data != null) {
+    xdg.configFile."gmail-tui/config" = lib.mkIf (cfg.storeDir != null) {
       text = ''
-        # Managed by Home Manager (programs.gmail-tui.data).
-        data ${cfg.data}
+        # Managed by Home Manager (programs.gmail-tui.storeDir).
+        data ${cfg.storeDir}
         ${cfg.extraConfig}
       '';
     };

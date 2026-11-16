@@ -125,10 +125,10 @@ Package-only (no module / no managed keys):
 
   programs.gmail-tui = {
     enable = true;
-    # Writes data … into ~/.config/gmail-tui/config.
-    data = "${config.home.homeDirectory}/mail/gmail-tui";
+    # Writes data … into ~/.config/gmail-tui/config (mail store root).
+    storeDir = "${config.home.homeDirectory}/mail/gmail-tui";
     # Shell aliases: gmail-tui-work → gmail-tui --profile work
-    # (shared config/keys; separate mail store under <data>/work/).
+    # (shared config/keys; separate store under <storeDir>/work/).
     profiles = [ "work" "home" ];
     # Extra lines for the managed config (optional).
     # extraConfig = ''
