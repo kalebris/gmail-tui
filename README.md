@@ -14,10 +14,17 @@ Mail and OAuth tokens live under XDG paths by default:
 | --- | --- |
 | Config / key bindings | `~/.config/gmail-tui/` |
 | Index, blobs, tokens | `~/.local/share/gmail-tui/accounts/<email>/` |
+| Named profile store | `<data>/<profile>/accounts/<email>/` |
 
 Override with `--config FILE_OR_DIR` (or `GMAIL_TUI_CONFIG`) when the XDG defaults
 are a poor fit — a directory means `<dir>/config`, and keys default to `<dir>/keys`.
-`--data DIR` still overrides the mail store from that file. To choose the top-bar order, add one `account` line per address in `~/.config/gmail-tui/config`. The file order is left to right. A mailbox you leave out still shows up, after the ones you named. Date stamps (mail list, calendar, CLI) share strftime patterns from the same file:
+`--data DIR` still overrides the mail store from that file. `--profile NAME` (or
+`GMAIL_TUI_PROFILE`) keeps that shared config and uses `<data>/NAME/` for the
+index and tokens instead — handy for separate “home” / “work” mailboxes without
+duplicating key bindings. To choose the top-bar order, add one `account` line per
+address in `~/.config/gmail-tui/config`. The file order is left to right. A mailbox
+you leave out still shows up, after the ones you named. Date stamps (mail list,
+calendar, CLI) share strftime patterns from the same file:
 
 ```
 account ada@gmail.com

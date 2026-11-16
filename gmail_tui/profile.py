@@ -1,6 +1,6 @@
 """Optional CPU and memory log.
 
-``gmail-tui --profile`` appends to ``<data>/profile.log``. Nothing is recorded
+``gmail-tui --perf`` appends to ``<data>/profile.log``. Nothing is recorded
 unless that flag is set. The log has three kinds of lines:
 
 * ``mem`` / ``cpu`` — RSS and, after the first sample, each thread's share of

@@ -14,8 +14,10 @@ from gmail_tui.settings import (
     default_data,
     default_text,
     load,
+    normalize_profile,
     parse,
     resolve_config_path,
+    resolve_data_dir,
     xdg_config_home,
     xdg_data_home,
 )
@@ -63,11 +65,24 @@ class SettingsTests(unittest.TestCase):
         text = default_text(Path("/tmp/gmail-tui-config"))
         self.assertIn("download", text)
         self.assertIn("data", text)
+        self.assertIn("--profile", text)
         self.assertIn("account", text)
         self.assertIn("date", text)
         self.assertIn("time", text)
         self.assertIn("datetime", text)
         self.assertIn("weekday", text)
+
+    def test_profile_nests_under_the_data_directory(self) -> None:
+        base = Path("/var/gmail-tui")
+        self.assertEqual(resolve_data_dir(base), base)
+        self.assertEqual(resolve_data_dir(base, "work"), base / "work")
+        self.assertEqual(normalize_profile("  home  "), "home")
+        self.assertIsNone(normalize_profile(""))
+        self.assertIsNone(normalize_profile(None))
+        with self.assertRaises(SettingsError):
+            normalize_profile("../escape")
+        with self.assertRaises(SettingsError):
+            normalize_profile("a/b")
 
     def test_date_formats_apply_to_helpers(self) -> None:
         from datetime import datetime

@@ -51,13 +51,13 @@ class CliTests(unittest.TestCase):
             after = {path.name for path in (data / "accounts").iterdir()} if (data / "accounts").is_dir() else set()
             self.assertEqual(after, before)
 
-    def test_profile_flag_writes_a_log(self) -> None:
+    def test_perf_flag_writes_a_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp) / "mail"
             env = os.environ.copy()
             env["XDG_CONFIG_HOME"] = str(Path(tmp) / "config")
             result = subprocess.run(
-                [sys.executable, "-m", "gmail_tui", "--data", str(data), "--profile", "init"],
+                [sys.executable, "-m", "gmail_tui", "--data", str(data), "--perf", "init"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -68,6 +68,31 @@ class CliTests(unittest.TestCase):
             self.assertIn("profile start", log)
             self.assertIn("mem rss=", log)
             self.assertIn("profile stop", log)
+
+    def test_profile_uses_a_subdirectory_of_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = root / "mail-store"
+            config_home = root / "config"
+            config_home.mkdir()
+            (config_home / "gmail-tui").mkdir()
+            (config_home / "gmail-tui" / "config").write_text(
+                f"data {data}\ndownload {root / 'saved'}\n",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["XDG_CONFIG_HOME"] = str(config_home)
+            env.pop("GMAIL_TUI_PROFILE", None)
+            result = subprocess.run(
+                [sys.executable, "-m", "gmail_tui", "--profile", "work", "init"],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((data / "work" / "accounts" / "primary" / "index.sqlite").exists())
+            self.assertFalse((data / "accounts").exists())
 
     def test_config_data_is_used_without_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

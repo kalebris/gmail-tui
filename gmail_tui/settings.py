@@ -73,6 +73,31 @@ def default_data() -> Path:
     return xdg_data_home() / "gmail-tui"
 
 
+def normalize_profile(name: str | None) -> str | None:
+    """Validate a profile directory name. Empty means the base data directory."""
+    if name is None:
+        return None
+    chosen = name.strip()
+    if not chosen:
+        return None
+    if chosen in {".", ".."} or "/" in chosen or "\\" in chosen:
+        raise SettingsError(
+            f"profile {name!r} must be a single directory name (no slashes)"
+        )
+    return chosen
+
+
+def resolve_data_dir(
+    base: Path,
+    profile: str | None = None,
+) -> Path:
+    """Mail store root. With a profile, use ``<base>/<profile>/``."""
+    name = normalize_profile(profile)
+    if name is None:
+        return base
+    return base / name
+
+
 def default_download() -> Path:
     folder = Path.home() / "Downloads"
     if folder.is_dir():
@@ -89,6 +114,8 @@ def default_text(path: Path | None = None) -> str:
         "# gmail-tui reads this file when it starts, from any working directory.\n"
         "# download   directory for saved attachments (tab-complete, xdg-open)\n"
         "# data       mail index and body cache when --data is omitted\n"
+        "#            gmail-tui --profile NAME uses <data>/NAME/ for that run;\n"
+        "#            keys and this config file stay shared across profiles.\n"
         "# account    one address per line, left to right on the top bar.\n"
         "#            Any mailbox omitted here still appears, after these.\n"
         "# date       strftime for calendar days / all-day stamps (default %Y-%m-%d)\n"

@@ -30,6 +30,7 @@ from gmail_tui.settings import (
     default_data,
     load as load_settings,
     resolve_config_path,
+    resolve_data_dir,
 )
 from gmail_tui.store import MessageNotFound, Store, ThreadCursor
 from gmail_tui import profile
@@ -57,6 +58,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--profile",
+        metavar="NAME",
+        default=None,
+        help=(
+            "use <data>/NAME/ for the mail index and tokens "
+            "(or set GMAIL_TUI_PROFILE); config and keys stay shared"
+        ),
+    )
+    parser.add_argument(
+        "--perf",
         action="store_true",
         help="append CPU, memory, and per-message timings to <data>/profile.log",
     )
@@ -110,8 +120,14 @@ def main(argv: list[str] | None = None) -> int:
         data = settings.data
     else:
         data = default_data()
+    profile_name = args.profile if args.profile is not None else os.environ.get("GMAIL_TUI_PROFILE")
     try:
-        if args.profile:
+        data = resolve_data_dir(data, profile_name)
+    except SettingsError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    try:
+        if args.perf:
             profile.start(data / "profile.log")
             profile.attach()
         return _run(args, data, download=settings.download, settings_path=settings_file)
