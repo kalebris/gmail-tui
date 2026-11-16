@@ -24,16 +24,19 @@ let
       exec ${exe} --profile ${lib.escapeShellArg name} "$@"
     ''
   ) cfg.profiles;
+  # clientJson is often an agenix home path like
+  # "${XDG_RUNTIME_DIR}/agenix/…". Double-quote so the shell expands it;
+  # escapeShellArg would single-quote and leave the literal unevaluated.
   loginPackages = lib.optionals (cfg.clientJson != null) (
     [
       (pkgs.writeShellScriptBin "gmail-tui-login" ''
-        exec ${exe} login --client-json ${lib.escapeShellArg cfg.clientJson} "$@"
+        exec ${exe} login --client-json "${cfg.clientJson}" "$@"
       '')
     ]
     ++ map (
       name:
       pkgs.writeShellScriptBin "gmail-tui-${name}-login" ''
-        exec ${exe} --profile ${lib.escapeShellArg name} login --client-json ${lib.escapeShellArg cfg.clientJson} "$@"
+        exec ${exe} --profile ${lib.escapeShellArg name} login --client-json "${cfg.clientJson}" "$@"
       ''
     ) cfg.profiles
   );
