@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+uv.lock.bak
+gmail-tui-data/
+gtui-data/
+oauth.json
+client_secret.json
+client_secret_*.json
+*.log
+profile.log
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+result

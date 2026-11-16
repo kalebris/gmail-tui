@@ -1,0 +1,191 @@
+"""Local index: WAL, keyset list, FTS5, and the mutation queue."""
+
+from __future__ import annotations
+
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+from gmail_tui.gmail import IncomingMessage, Label
+from gmail_tui.search import parse_query
+from gmail_tui.store import Store, ThreadCursor
+
+
+def _message(
+    gmail_id: str,
+    thread_id: str,
+    date: int,
+    subject: str,
+    labels: list[str],
+    sender: str = "Ada <ada@example.com>",
+) -> IncomingMessage:
+    return IncomingMessage(
+        gmail_id=gmail_id,
+        thread_id=thread_id,
+        label_ids=labels,
+        internal_date_ms=date,
+        subject=subject,
+        from_addr=sender,
+        to_addr="me@gmail.com",
+        snippet=subject,
+    )
+
+
+class StoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store.open(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_wal_and_private_layout(self) -> None:
+        mode = self.store.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertEqual(mode.lower(), "wal")
+        root = Path(self.tmp.name)
+        self.assertTrue((root / "index.sqlite").is_file())
+        self.assertTrue((root / "blobs").is_dir())
+        self.assertFalse((root / "cur").exists())
+        self.assertFalse((root / "new").exists())
+
+    def test_keyset_pagination_uses_label_index(self) -> None:
+        self.store.upsert_metadata(_message("m1", "t1", 1000, "old", ["INBOX"]), "missing")
+        self.store.upsert_metadata(_message("m2", "t2", 3000, "new", ["INBOX", "UNREAD"]), "missing")
+        self.store.upsert_metadata(_message("m3", "t3", 2000, "mid", ["INBOX"]), "missing")
+        self.store.upsert_metadata(_message("m4", "t4", 4000, "other", ["Label_9"]), "missing")
+
+        plan = self.store.explain_list("INBOX")
+        self.assertIn("thread_labels_list", plan)
+
+        first = self.store.list_threads("INBOX", limit=2)
+        self.assertEqual([row.subject for row in first], ["new", "mid"])
+        self.assertIsInstance(first[0].thread_id, int)
+        self.assertIsInstance(first[0].gmail_thread_id, str)
+        self.assertTrue(first[0].unread_count)
+
+        cursor = ThreadCursor(first[-1].latest_internal_date_ms, first[-1].thread_id)
+        second = self.store.list_threads("INBOX", cursor, limit=2)
+        self.assertEqual([row.subject for row in second], ["old"])
+        paged = self.store.explain_list("INBOX", cursor)
+        self.assertIn("thread_labels_list", paged)
+
+    def test_equal_dates_are_ordered_by_thread_id(self) -> None:
+        self.store.upsert_metadata(_message("m1", "t1", 5000, "first", ["INBOX"]), "missing")
+        self.store.upsert_metadata(_message("m2", "t2", 5000, "second", ["INBOX"]), "missing")
+        page = self.store.list_threads("INBOX", limit=1)
+        self.assertEqual(page[0].subject, "second")
+        cursor = ThreadCursor(page[0].latest_internal_date_ms, page[0].thread_id)
+        rest = self.store.list_threads("INBOX", cursor, limit=1)
+        self.assertEqual(rest[0].subject, "first")
+
+    def test_missing_bodies_come_from_the_inbox_before_newer_mail(self) -> None:
+        self.store.replace_labels(
+            [
+                Label("INBOX", "INBOX", "system"),
+                Label("Label_1", "Work", "user"),
+            ]
+        )
+        self.store.upsert_metadata(_message("old", "t1", 1_000, "old inbox", ["INBOX"]), "missing")
+        self.store.upsert_metadata(_message("new", "t2", 9_000, "new archive", ["Label_1"]), "missing")
+        self.assertEqual(self.store.missing_body_ids(1), ["old"])
+        self.assertEqual(self.store.missing_body_ids(2), ["old", "new"])
+
+    def test_local_label_change_is_visible_and_queued(self) -> None:
+        self.store.upsert_metadata(_message("m1", "t1", 1000, "hello", ["INBOX", "UNREAD"]), "missing")
+        self.store.apply_local_labels("m1", add=["STARRED"], remove=["INBOX"])
+        self.assertEqual(self.store.message_label_ids("m1"), {"UNREAD", "STARRED"})
+        self.assertEqual(self.store.list_threads("INBOX"), [])
+        starred = self.store.list_threads("STARRED")
+        self.assertEqual(len(starred), 1)
+        self.assertTrue(starred[0].starred)
+        self.assertIn(("m1", "STARRED", "add"), self.store.pending_mutations())
+        self.assertIn(("m1", "INBOX", "remove"), self.store.pending_mutations())
+
+    def test_fts_indexes_headers_then_body_and_drops_on_delete(self) -> None:
+        self.store.upsert_metadata(_message("m1", "t1", 1000, "Hello there", ["INBOX"]), "missing")
+        parsed = parse_query("Hello")
+        self.assertEqual([hit.gmail_id for hit in self.store.search_local(parsed, 10)], ["m1"])
+        self.store.write_body(
+            _message("m1", "t1", 1000, "Hello there", ["INBOX"]),
+            b"Subject: Hello there\r\n\r\nplatypus lives here\r\n",
+            "platypus lives here",
+        )
+        body_hits = self.store.search_local(parse_query("platypus"), 10)
+        self.assertEqual([hit.gmail_id for hit in body_hits], ["m1"])
+        self.assertTrue(body_hits[0].body_cached)
+        self.assertTrue((Path(self.tmp.name) / "blobs" / "m1.eml").is_file())
+        self.store.delete_message("m1")
+        self.assertEqual(self.store.search_local(parse_query("platypus"), 10), [])
+        self.assertEqual(self.store.search_local(parse_query("Hello"), 10), [])
+
+    def test_transaction_rolls_back_the_history_cursor(self) -> None:
+        before = self.store.history_id()
+        with self.assertRaises(RuntimeError):
+            with self.store._tx():
+                self.store.conn.execute("UPDATE sync_state SET history_id='999' WHERE id=1")
+                raise RuntimeError("boom")
+        self.assertEqual(self.store.history_id(), before)
+
+    def test_set_profile_refuses_a_different_address(self) -> None:
+        self.store.set_email("bela.toros@gmail.com")
+        with self.assertRaises(ValueError):
+            self.store.set_profile("kalebsys@gmail.com", "50", 10)
+        self.assertEqual(self.store.account_email(), "bela.toros@gmail.com")
+        self.store.set_profile("Bela.Toros@gmail.com", "50", 10)
+        self.assertEqual(self.store.account_email(), "Bela.Toros@gmail.com")
+
+    def test_rejects_path_like_ids(self) -> None:
+        with self.assertRaises(ValueError):
+            self.store.upsert_metadata(_message("../etc", "t1", 1, "x", ["INBOX"]), "missing")
+
+    def test_a_writer_does_not_block_a_reader(self) -> None:
+        self.store.upsert_metadata(_message("m1", "t1", 1, "Hi", ["INBOX"]), "missing")
+        started = threading.Event()
+        release = threading.Event()
+
+        def writer() -> None:
+            self.store.conn.execute("BEGIN IMMEDIATE")
+            started.set()
+            release.wait(3)
+            self.store.conn.execute("ROLLBACK")
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        self.assertTrue(started.wait(2))
+        try:
+            began = time.monotonic()
+            self.assertEqual(self.store.inbox_counts()[0], 1)
+            self.assertLess(time.monotonic() - began, 0.5)
+        finally:
+            release.set()
+            thread.join()
+
+    def test_retain_inbox_finishes_across_batches(self) -> None:
+        for index in range(3):
+            self.store.upsert_metadata(
+                _message(f"m{index}", f"t{index}", index + 1, "S", ["INBOX"]),
+                "missing",
+            )
+        nxt = self.store.retain_inbox(set(), after_id=0, limit=2)
+        self.assertIsNotNone(nxt)
+        self.assertEqual(self.store.inbox_counts()[0], 1)
+        done = self.store.retain_inbox({"m2"}, after_id=nxt or 0, limit=2)
+        self.assertIsNone(done)
+        self.assertEqual(self.store.inbox_counts()[0], 1)
+
+    def test_unread_folder_count_skips_trash(self) -> None:
+        self.store.upsert_metadata(_message("m1", "t1", 3000, "inbox", ["INBOX", "UNREAD"]), "missing")
+        self.store.upsert_metadata(_message("m2", "t2", 2000, "trashed", ["TRASH", "UNREAD"]), "missing")
+        info = {row.gmail_id: row for row in self.store.list_label_info()}
+        self.assertEqual((info["UNREAD"].unread, info["UNREAD"].total), (1, 1))
+        self.assertEqual((info["TRASH"].unread, info["TRASH"].total), (1, 1))
+        self.assertEqual([row.subject for row in self.store.list_mail_threads("UNREAD")], ["inbox"])
+        self.assertEqual([row.subject for row in self.store.list_mail_threads("TRASH")], ["trashed"])
+        self.assertEqual(self.store.mailbox_counts(), (1, 1))
+
+
+if __name__ == "__main__":
+    unittest.main()
