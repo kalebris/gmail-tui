@@ -118,16 +118,22 @@ Package-only (no module / no managed keys):
 ### Home Manager
 
 ```nix
-{ inputs, pkgs, ... }:
+{ config, inputs, pkgs, ... }:
 {
   imports = [ inputs.gmail-tui.homeModules.default ];
   nixpkgs.overlays = [ inputs.gmail-tui.overlays.default ];
 
   programs.gmail-tui = {
     enable = true;
+    # Writes data … into ~/.config/gmail-tui/config.
+    data = "${config.home.homeDirectory}/mail/gmail-tui";
     # Shell aliases: gmail-tui-work → gmail-tui --profile work
     # (shared config/keys; separate mail store under <data>/work/).
     profiles = [ "work" "home" ];
+    # Extra lines for the managed config (optional).
+    # extraConfig = ''
+    #   account ada@example.com
+    # '';
     # Writes ~/.config/gmail-tui/keys (overrides only).
     keys = {
       archive = [ "e" ];

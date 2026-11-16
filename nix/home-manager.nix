@@ -33,6 +33,35 @@ in
       description = "gmail-tui package to install.";
     };
 
+    data = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = lib.literalExpression ''"''${config.home.homeDirectory}/mail/gmail-tui"'';
+      description = ''
+        Mail index and body-cache directory. When set, Home Manager writes
+        <filename>~/.config/gmail-tui/config</filename> with a
+        <literal>data</literal> line so <command>gmail-tui</command> (and
+        <option>profiles</option> aliases) use this store without
+        <command>--data</command>. <literal>~</literal> is expanded by gmail-tui.
+      '';
+    };
+
+    extraConfig = lib.mkOption {
+      type = lib.types.lines;
+      default = "";
+      example = ''
+        account ada@example.com
+        account bea@example.com
+        download ~/Downloads
+      '';
+      description = ''
+        Extra lines appended to the managed
+        <filename>~/.config/gmail-tui/config</filename> when
+        <option>programs.gmail-tui.data</option> is set (account order, download
+        path, date formats, …).
+      '';
+    };
+
     profiles = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -91,6 +120,14 @@ in
     home.packages = [ cfg.package ];
 
     home.shellAliases = lib.mkIf (cfg.profiles != [ ]) profileAliases;
+
+    xdg.configFile."gmail-tui/config" = lib.mkIf (cfg.data != null) {
+      text = ''
+        # Managed by Home Manager (programs.gmail-tui.data).
+        data ${cfg.data}
+        ${cfg.extraConfig}
+      '';
+    };
 
     xdg.configFile."gmail-tui/keys" = lib.mkIf (cfg.keysFile != null || cfg.keys != { }) (
       if cfg.keysFile != null then
