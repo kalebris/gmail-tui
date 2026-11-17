@@ -12,7 +12,7 @@ import sys
 import webbrowser
 from pathlib import Path
 
-from gmail_tui.accounts import cli_store_dir, resolve_account_dir
+from gmail_tui.accounts import cli_store_dir, discover, resolve_account_dir
 from gmail_tui.gmail import GmailError, NullGmail, Offline
 from gmail_tui.http_gmail import HttpGmail
 from gmail_tui.oauth import (
@@ -24,7 +24,9 @@ from gmail_tui.oauth import (
     read_client_file,
     store_tokens,
 )
+from gmail_tui import oauth_tpm
 from gmail_tui.settings import (
+    Settings,
     SettingsError,
     config_path,
     default_data,
@@ -130,12 +132,32 @@ def main(argv: list[str] | None = None) -> int:
         if args.perf:
             profile.start(data / "profile.log")
             profile.attach()
+        _setup_oauth_tpm(settings, settings_file, data, args.command)
         return _run(args, data, download=settings.download, settings_path=settings_file)
     except (GmailError, MessageNotFound, ValueError, OAuthError) as exc:
         print(exc, file=sys.stderr)
         return 1
     finally:
         profile.stop()
+
+
+def _setup_oauth_tpm(
+    settings: Settings,
+    settings_file: Path,
+    data: Path,
+    command: str | None,
+) -> None:
+    """Ask for the TPM PIN once, then seal/load oauth tokens under that key."""
+    if not settings.oauth_tpm:
+        oauth_tpm.reset()
+        return
+    identity = settings.oauth_tpm_identity or oauth_tpm.default_identity_path(settings_file)
+    oauth_tpm.prepare(identity)
+    # Login creates tokens; other commands may need to decrypt existing ones.
+    if command in {"login", "add-account", "init"}:
+        return
+    roots = [account.root for account in discover(data)]
+    oauth_tpm.unlock_roots(roots)
 
 
 def _keys_path(args: argparse.Namespace, settings_file: Path) -> Path | None:

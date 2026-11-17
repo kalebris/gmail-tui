@@ -32,6 +32,7 @@ AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 _FILE = "oauth.json"
+_AGE_FILE = "oauth.json.age"
 
 
 class OAuthError(Exception):
@@ -52,6 +53,15 @@ class Token:
     access_token: str
     refresh_token: str
     expires_at: float
+
+
+# Decrypted tokens kept for this process after a TPM unlock.
+_cache: dict[Path, StoredAuth] = {}
+
+
+def clear_cache() -> None:
+    """Tests / shutdown: drop in-memory tokens."""
+    _cache.clear()
 
 
 class PendingLogin:
@@ -130,12 +140,52 @@ def read_client_file(path: Path) -> tuple[str, str]:
 
 
 def load(root: Path) -> StoredAuth | None:
+    key = root.resolve()
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
+    from gmail_tui import oauth_tpm
+
+    if oauth_tpm.enabled():
+        age_path = root / _AGE_FILE
+        if age_path.exists():
+            stored = _parse_auth(oauth_tpm.decrypt_bytes(age_path), age_path)
+            _cache[key] = stored
+            return stored
+        path = root / _FILE
+        if not path.exists():
+            return None
+        stored = _parse_auth(path.read_bytes(), path)
+        # Migrate plaintext into the TPM-sealed file on first read.
+        oauth_tpm.migrate_plaintext(root, _encode_auth(stored))
+        _cache[key] = stored
+        return stored
     path = root / _FILE
     if not path.exists():
         return None
+    return _parse_auth(path.read_bytes(), path)
+
+
+def _encode_auth(stored: StoredAuth) -> bytes:
+    return (
+        json.dumps(
+            {
+                "client_id": stored.client_id,
+                "client_secret": stored.client_secret,
+                "refresh_token": stored.refresh_token,
+                "access_token": stored.access_token,
+                "expires_at": stored.expires_at,
+            },
+            indent=2,
+        )
+        + "\n"
+    ).encode()
+
+
+def _parse_auth(raw: bytes, path: Path) -> StoredAuth:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise OAuthError(f"cannot read {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise OAuthError(f"cannot read {path}: expected an object")
@@ -269,9 +319,22 @@ def _error_text(exc: urllib.error.HTTPError) -> str:
 
 def _write(root: Path, payload: dict[str, object]) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(payload, indent=2) + "\n").encode()
+    stored = StoredAuth(
+        client_id=str(payload.get("client_id") or ""),
+        client_secret=str(payload.get("client_secret") or ""),
+        refresh_token=str(payload.get("refresh_token") or ""),
+        access_token=str(payload.get("access_token") or ""),
+        expires_at=float(payload.get("expires_at") or 0),
+    )
+    from gmail_tui import oauth_tpm
+
+    if oauth_tpm.enabled():
+        oauth_tpm.migrate_plaintext(root, encoded)
+        _cache[root.resolve()] = stored
+        return
     path = root / _FILE
     temporary = path.with_suffix(".json.tmp")
-    encoded = (json.dumps(payload, indent=2) + "\n").encode()
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, encoded)
@@ -280,6 +343,7 @@ def _write(root: Path, payload: dict[str, object]) -> None:
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
     os.chmod(path, 0o600)
+    _cache[root.resolve()] = stored
 
 
 def _challenge(verifier: str) -> str:

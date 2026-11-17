@@ -31,6 +31,9 @@ class Settings:
     time: str = "%H:%M"
     datetime: str = "%Y-%m-%d %H:%M"
     weekday: str = "%a %d"
+    # Seal oauth.json with age-plugin-tpm; startup asks for the TPM PIN.
+    oauth_tpm: bool = False
+    oauth_tpm_identity: Path | None = None
 
 
 def xdg_config_home() -> Path:
@@ -122,6 +125,9 @@ def default_text(path: Path | None = None) -> str:
         "# time       strftime for hour labels (default %H:%M)\n"
         "# datetime   strftime for mail and event stamps (default date + time)\n"
         "# weekday    strftime for week columns (default %a %d)\n"
+        "# oauth-tpm  yes → encrypt each account's oauth.json with a TPM age key\n"
+        "#            (needs age + age-plugin-tpm on PATH; asks for the TPM PIN)\n"
+        "# oauth-tpm-identity  optional path to that age-plugin-tpm identity file\n"
         "#\n"
         f"download {download}\n"
         f"data {data}\n"
@@ -129,6 +135,7 @@ def default_text(path: Path | None = None) -> str:
         "time %H:%M\n"
         "datetime %Y-%m-%d %H:%M\n"
         "weekday %a %d\n"
+        "# oauth-tpm no\n"
     )
 
 
@@ -161,6 +168,8 @@ def parse(text: str) -> Settings:
     datetime_fmt: str | None = None
     weekday_fmt = "%a %d"
     seen_datetime = False
+    oauth_tpm = False
+    oauth_tpm_identity: Path | None = None
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -186,6 +195,10 @@ def parse(text: str) -> Settings:
             seen_datetime = True
         elif name == "weekday":
             weekday_fmt = _strftime(value, lineno)
+        elif name == "oauth-tpm":
+            oauth_tpm = _bool(value, lineno)
+        elif name == "oauth-tpm-identity":
+            oauth_tpm_identity = _path(value)
         else:
             raise SettingsError(f"line {lineno}: unknown setting {name}")
     if not seen_datetime or datetime_fmt is None:
@@ -198,7 +211,18 @@ def parse(text: str) -> Settings:
         time=time_fmt,
         datetime=datetime_fmt,
         weekday=weekday_fmt,
+        oauth_tpm=oauth_tpm,
+        oauth_tpm_identity=oauth_tpm_identity,
     )
+
+
+def _bool(value: str, lineno: int) -> bool:
+    key = value.strip().casefold()
+    if key in {"yes", "true", "on", "1"}:
+        return True
+    if key in {"no", "false", "off", "0"}:
+        return False
+    raise SettingsError(f"line {lineno}: expected yes/no for boolean, got {value!r}")
 
 
 def _strftime(value: str, lineno: int) -> str:

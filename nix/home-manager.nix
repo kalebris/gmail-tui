@@ -74,12 +74,13 @@ in
         account ada@example.com
         account bea@example.com
         download ~/Downloads
+        oauth-tpm yes
       '';
       description = ''
         Extra lines appended to the managed
         <filename>~/.config/gmail-tui/config</filename> when
         <option>programs.gmail-tui.storeDir</option> is set (account order,
-        download path, date formats, …).
+        download path, date formats, <literal>oauth-tpm yes</literal>, …).
       '';
     };
 

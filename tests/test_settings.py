@@ -71,6 +71,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("time", text)
         self.assertIn("datetime", text)
         self.assertIn("weekday", text)
+        self.assertIn("oauth-tpm", text)
 
     def test_profile_nests_under_the_data_directory(self) -> None:
         base = Path("/var/gmail-tui")

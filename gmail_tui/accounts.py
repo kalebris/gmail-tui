@@ -19,6 +19,7 @@ _ACCOUNT_FILES = (
     "index.sqlite-wal",
     "index.sqlite-shm",
     "oauth.json",
+    "oauth.json.age",
 )
 
 
@@ -158,7 +159,11 @@ def _move_account_files(source: Path, dest: Path) -> None:
 
 
 def _is_account(root: Path) -> bool:
-    return (root / "index.sqlite").exists() or (root / "oauth.json").exists()
+    return (
+        (root / "index.sqlite").exists()
+        or (root / "oauth.json").exists()
+        or (root / "oauth.json.age").exists()
+    )
 
 
 def _describe(root: Path) -> Account:

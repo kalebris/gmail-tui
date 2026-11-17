@@ -62,6 +62,28 @@ gmail-tui login --client-json ~/.config/gmail-tui/client_secret.json
 Alternatives: `--client-id` / `--client-secret`, or env vars `GMAIL_TUI_CLIENT_ID` and `GMAIL_TUI_CLIENT_SECRET`.
 After the first login, tokens (and the client id/secret) are stored as `oauth.json` (`0600`) in that account’s folder under `accounts/<email>/`.
 
+### TPM-sealed tokens (optional)
+
+To keep refresh tokens off disk in plaintext, enable TPM sealing in
+`~/.config/gmail-tui/config`:
+
+```
+oauth-tpm yes
+# oauth-tpm-identity ~/.config/gmail-tui/oauth-tpm.identity
+```
+
+gmail-tui then stores `oauth.json.age` encrypted with [age](https://age-encryption.org/)
+and [age-plugin-tpm](https://github.com/Foxboron/age-plugin-tpm). On first use it
+creates a TPM-bound identity (you choose a PIN). Every later start asks for that
+PIN once, decrypts the tokens into memory, and never re-prompts for refreshes in
+the same process. Plaintext `oauth.json` files are migrated automatically the
+first time they are read with `oauth-tpm` on.
+
+Needs a TPM, plus `age` and `age-plugin-tpm` on `PATH` (the Nix package wraps
+both). Tokens stay bound to that machine’s TPM — copy the mail cache freely, but
+run `gmail-tui login` again on a new host. For non-interactive use, set
+`AGE_TPM_PIN` instead of the prompt.
+
 Login asks for Gmail modify plus full Calendar access (list calendars, view/create/edit/delete events). Pick the Google account in the browser; gmail-tui stores the tokens on `accounts/<email>/` for that address. Older installs that kept the first mailbox in the data root are moved into `accounts/` automatically. If you logged in before Calendar support, run `gmail-tui login` again for each account you use (a token refresh does not add Calendar). Also enable **Google Calendar API** on the same Cloud project as your OAuth client — a 403 “API has not been used” means that switch is still off.
 
 Google may show a “This app hasn’t been verified” warning for your unpublished client — that is expected until you publish and verify the consent screen.

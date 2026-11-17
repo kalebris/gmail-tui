@@ -37,7 +37,13 @@
 
           postInstall = ''
             wrapProgram $out/bin/gmail-tui \
-              --prefix PATH : ${final.lib.makeBinPath [ final.libnotify ]} \
+              --prefix PATH : ${
+                final.lib.makeBinPath [
+                  final.libnotify
+                  final.age
+                  final.age-plugin-tpm
+                ]
+              } \
               --prefix TERMINFO_DIRS : ${final.ncurses}/share/terminfo
           '';
 
@@ -92,6 +98,8 @@
               sqlite
               ncurses
               libnotify
+              age
+              age-plugin-tpm
             ];
             env.UV_PYTHON = "${pkgs.python3}/bin/python3";
             env.UV_PYTHON_DOWNLOADS = "never";
