@@ -107,6 +107,9 @@ class MailSession:
         self.label_scroll = 0
         self.message_scroll = 0
         self.reader_scroll = 0
+        # After a no-op scroll at the reader edge, a second press the same way
+        # leaves for the message list (j/down at the bottom, k/up at the top).
+        self._reader_edge: int | None = None
         self.sync_phase = "idle"
         self.sync_done = 1
         self.sync_total = 1
@@ -464,7 +467,19 @@ class MailSession:
         window = max(1, self.reader_window)
         total = len(self.reader_view)
         limit = max(0, total - window)
-        self.reader_scroll = min(limit, max(0, self.reader_scroll + delta))
+        before = self.reader_scroll
+        after = min(limit, max(0, before + delta))
+        if after != before:
+            self.reader_scroll = after
+            self._reader_edge = None
+            return
+        # Already at the edge this move was trying to cross.
+        edge = 1 if delta > 0 else -1
+        if self._reader_edge == edge:
+            self._reader_edge = None
+            self.leave_message()
+            return
+        self._reader_edge = edge
 
     def activate(self) -> None:
         if self.focus == "labels":
@@ -571,21 +586,47 @@ class MailSession:
     def toggle_order(self) -> None:
         self.newest_first = not self.newest_first
         anchor = None
+        kept_cursor = self.message_cursor
+        kept_row = kept_cursor - self.message_scroll
+        depth = len(self._mail_threads)
         if self.messages:
             index = _clamp(self.message_cursor, len(self.messages))
             anchor = _row_identity(self.messages[index])
         if self.search_text:
             self._show_saved_search()
-        else:
-            self.load_messages(fetch=False)
+            return
+        self.load_messages(fetch=False, open_reader=False)
+        # load_messages only pulls the first page. Keep the same depth so a
+        # flip mid-scroll (or mid-download) does not wipe already-loaded mail.
+        self._ensure_mail_depth(depth, anchor)
+        if self.messages:
+            found = _list_index(self.messages, anchor, "", 0) if anchor else None
+            self.message_cursor = (
+                found if found is not None else min(kept_cursor, len(self.messages) - 1)
+            )
+            window = max(1, self.message_window)
+            preferred = max(0, self.message_cursor - max(0, kept_row))
+            # A full reverse on a short folder should not scroll the earlier
+            # rows away just to pin the selection on the same screen line.
+            if len(self.messages) <= window:
+                preferred = 0
+            self.message_scroll = _reveal(self.message_cursor, preferred, window)
+            self.load_reader(fetch=False)
+
+    def _ensure_mail_depth(self, depth: int, anchor: str | None) -> None:
+        """Load further pages until ``depth`` thread heads (or the anchor) are back."""
+        while self._more and len(self._mail_threads) < max(0, depth):
+            before = len(self._mail_threads)
+            self._fill_page(force=True)
+            if len(self._mail_threads) == before:
+                break
         if not anchor:
             return
-        for index, item in enumerate(self.messages):
-            if _row_identity(item) == anchor:
-                self.message_cursor = index
+        while self._more and all(_row_identity(item) != anchor for item in self.messages):
+            before = len(self._mail_threads)
+            self._fill_page(force=True)
+            if len(self._mail_threads) == before:
                 break
-        if self.messages:
-            self.load_reader(fetch=False)
 
     def toggle_selected(self) -> None:
         if not self.messages:
@@ -922,6 +963,7 @@ class MailSession:
 
     def load_reader(self, *, fetch: bool) -> None:
         self.reader_scroll = 0
+        self._reader_edge = None
         self.find_line = None
         self.find_query = ""
         if not self.messages:
@@ -1199,6 +1241,7 @@ class MailSession:
         self.close_attachments()
         self.close_mime()
         self.close_raw_source()
+        self._reader_edge = None
         self.focus = "list"
         return True
 

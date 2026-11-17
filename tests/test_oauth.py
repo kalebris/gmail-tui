@@ -131,17 +131,34 @@ class OAuthTests(unittest.TestCase):
 
     def test_login_without_a_client_explains_the_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config"
+            config.write_text("data " + str(root / "mail") + "\n", encoding="utf-8")
             env = os.environ.copy()
-            for name in ("GMAIL_TUI_CLIENT_ID", "GMAIL_TUI_CLIENT_SECRET", "GMAIL_TUI_TOKEN"):
+            for name in (
+                "GMAIL_TUI_CLIENT_ID",
+                "GMAIL_TUI_CLIENT_SECRET",
+                "GMAIL_TUI_TOKEN",
+                "GMAIL_TUI_CONFIG",
+                "AGE_TPM_PIN",
+            ):
                 env.pop(name, None)
             result = subprocess.run(
-                [sys.executable, "-m", "gmail_tui", "--data", str(Path(tmp) / "mail"), "login", "--no-browser"],
+                [
+                    sys.executable,
+                    "-m",
+                    "gmail_tui",
+                    "--config",
+                    str(config),
+                    "login",
+                    "--no-browser",
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
                 env=env,
             )
-            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("client-json", result.stderr)
             self.assertIn("Desktop", result.stderr)
 

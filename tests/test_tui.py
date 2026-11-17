@@ -1080,6 +1080,55 @@ class MailboxTests(unittest.TestCase):
         finally:
             engine.store.close()
 
+    def test_second_edge_scroll_leaves_the_reader(self) -> None:
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            message = IncomingMessage(
+                gmail_id="edge1",
+                thread_id="tedge",
+                label_ids=["INBOX"],
+                internal_date_ms=9_800,
+                subject="Tall",
+                from_addr="Ada <ada@example.com>",
+                to_addr="me@gmail.com",
+            )
+            body = "\n".join(f"line {n}" for n in range(40))
+            raw = (
+                "Subject: Tall\r\nFrom: Ada <ada@example.com>\r\n"
+                f"To: me@gmail.com\r\n\r\n{body}\r\n"
+            ).encode()
+            self.store.upsert_metadata(message, "ready")
+            self.store.write_body(message, raw, body)
+            session = MailSession(engine)
+            session.focus = "list"
+            session.load_messages(fetch=False)
+            session.reader_window = 5
+            session.activate()
+            self.assertEqual(session.focus, "reader")
+            session.reveal(geometry(30, 80))
+            # Top: first k is a no-op bump, second leaves for the list.
+            self.assertEqual(session.reader_scroll, 0)
+            session.move(-1)
+            self.assertEqual(session.focus, "reader")
+            session.move(-1)
+            self.assertEqual(session.focus, "list")
+
+            session.activate()
+            session.reveal(geometry(30, 80))
+            # Bottom: scroll down, then a second j with nowhere to go leaves.
+            while session.reader_scroll < max(0, len(session.reader_view) - session.reader_window):
+                before = session.reader_scroll
+                session.move(1)
+                if session.reader_scroll == before:
+                    break
+            self.assertEqual(session.focus, "reader")
+            session.move(1)
+            self.assertEqual(session.focus, "reader")
+            session.move(1)
+            self.assertEqual(session.focus, "list")
+        finally:
+            engine.store.close()
+
     def test_hidden_urls_toggle_in_the_reader_and_find_follows(self) -> None:
         engine = Engine.open(self.tmp.name, NullGmail())
         try:
@@ -1669,6 +1718,48 @@ class MailboxTests(unittest.TestCase):
             self.assertLess(row.index(when), row.index("bea@example.com"))
         finally:
             engine.store.close()
+
+    def test_order_key_keeps_pages_already_loaded(self) -> None:
+        import gmail_tui.ui as ui
+
+        previous = ui.PAGE
+        ui.PAGE = 3
+        try:
+            for number in range(9):
+                self._message(
+                    f"ord{number}",
+                    f"to{number}",
+                    50_000 + number,
+                    f"Order {number}",
+                    "Ada <ada@example.com>",
+                    "me@gmail.com",
+                    ["INBOX"],
+                    "body",
+                )
+            engine = Engine.open(self.tmp.name, NullGmail())
+            try:
+                session = MailSession(engine)
+                session.focus = "list"
+                session.load_messages(fetch=False)
+                session._fill_page(force=True)
+                session._fill_page(force=True)
+                self.assertGreater(len(session.messages), ui.PAGE)
+                before_count = len(session.messages)
+                depth = len(session._mail_threads)
+                session.message_cursor = len(session.messages) - 1
+                session.message_scroll = max(0, session.message_cursor - 2)
+                held = session.messages[session.message_cursor].gmail_id
+                session.toggle_order()
+                self.assertFalse(session.newest_first)
+                self.assertGreaterEqual(len(session._mail_threads), depth)
+                self.assertEqual(len(session.messages), before_count)
+                self.assertEqual(session.messages[session.message_cursor].gmail_id, held)
+                # Without keeping depth, toggle_order used to drop back to one page.
+                self.assertGreater(len(session.messages), ui.PAGE)
+            finally:
+                engine.store.close()
+        finally:
+            ui.PAGE = previous
 
     def test_list_does_not_wrap_and_page_down_reaches_the_end(self) -> None:
         for number in range(4):
