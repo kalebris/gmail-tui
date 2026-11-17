@@ -504,6 +504,9 @@ def _queue_mail_alert(desk: _Desk, tab: Account, slot: _Account) -> None:
 
 def _remember(desk: _Desk, tab: Account, slot: _Account) -> None:
     tab.inbox, tab.unread = slot.engine.store.inbox_counts()
+    # The open tab's badge is drawn from the session. Switching in clears the
+    # job's dirty flag, so without this the badge fell back to older counts.
+    slot.session.inbox_count, slot.session.inbox_unread = tab.inbox, tab.unread
     email = slot.engine.store.account_email()
     if email:
         tab.name = email
@@ -668,10 +671,20 @@ def _loop(
             after = (session.mark_start, session.mark_end, session.marking)
             # Drag motion only moves the mark. Rebuild panes once; after that
             # rewrite the reverse-video run so the highlight keeps up.
-            if after[2] and before[2] and before != after:
+            if after[2] and before[2]:
                 dirty = False
                 acted = False
-                _paint_mark(screen, session, desk.index)
+                if before == after:
+                    continue
+                chosen = _drain_motion(screen, session, pending)
+                if chosen is not None and session.prompt != "send":
+                    _switch(desk, accounts, chosen)
+                    dirty = True
+                    continue
+                if session.marking:
+                    _paint_mark(screen, session, desk.index)
+                else:
+                    dirty = True
             continue
         if session.mark_start is not None:
             session.clear_mark()
@@ -1151,6 +1164,7 @@ def _paint(screen: curses.window, session: MailSession, accounts: list[Account],
     _highlight_pane(screen, session, geo)
     _highlight_selection(screen, session, geo)
     _highlight_mark(screen, session)
+    session.mark_rows = _mark_rows(session)
     _highlight_find(screen, session, geo)
     # Sixel and OSC-8 work fight the drag highlight and are expensive mid-drag.
     if session.marking:
@@ -1168,18 +1182,50 @@ def _paint_mark(screen: curses.window, session: MailSession, active: int) -> Non
     if height < 2 or width < 2 or not session.painted:
         return
     geo = geometry(height, width)
-    # Rewrite rows from the last paint so the previous mark is erased.
-    for y, line in enumerate(session.painted):
-        if y >= height - 1:
-            break
-        _add(screen, y, 0, line, _line_attr(session, geo, y))
-    _write_status(screen, session)
+    rows = _mark_rows(session)
+    covered = [span for span in (rows, session.mark_rows) if span is not None]
+    if covered:
+        # Only rows under the old or new mark change. Measuring every row of
+        # the screen on each motion event let a drag fall behind the mouse.
+        first = max(0, min(span[0] for span in covered))
+        last = min(len(session.painted), height - 1, max(span[1] for span in covered) + 1)
+        for y in range(first, last):
+            _add(screen, y, 0, session.painted[y], _line_attr(session, geo, y))
     _highlight_tab(screen, session, active)
     _highlight_pane(screen, session, geo)
     _highlight_selection(screen, session, geo)
     _highlight_mark(screen, session)
     _highlight_find(screen, session, geo)
+    session.mark_rows = rows
     _refresh(screen, soft=True)
+
+
+def _mark_rows(session: MailSession) -> tuple[int, int] | None:
+    """First and last screen row of the drag mark, inclusive."""
+    if session.mark_start is None or session.mark_end is None:
+        return None
+    top = min(session.mark_start[0], session.mark_end[0])
+    return top, max(session.mark_start[0], session.mark_end[0])
+
+
+def _drain_motion(screen: curses.window, session: MailSession, pending: list[str | int]) -> int | None:
+    """Apply mouse events already queued behind this one so a drag paints once.
+
+    Returns an account tab index when a queued release turned into a tab click.
+    """
+    screen.timeout(0)
+    while session.marking and not pending:
+        try:
+            key = screen.get_wch()
+        except curses.error:
+            return None
+        if key != curses.KEY_MOUSE:
+            pending.append(key)
+            return None
+        chosen = _mouse(session, screen)
+        if chosen is not None:
+            return chosen
+    return None
 
 
 def _refresh(screen: curses.window, *, soft: bool = False) -> None:

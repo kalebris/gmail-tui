@@ -131,6 +131,8 @@ class MailSession:
         self.mark_start: tuple[int, int] | None = None
         self.mark_end: tuple[int, int] | None = None
         self.marking = False
+        # Rows the drag mark covered at the last paint, so the next one can erase it.
+        self.mark_rows: tuple[int, int] | None = None
         self.painted: list[str] = []
         self.popup_choices: tuple[int, ...] = ()
         self.held: list[HeldChange] = []

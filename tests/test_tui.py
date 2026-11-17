@@ -800,6 +800,83 @@ class MailboxTests(unittest.TestCase):
         finally:
             engine.store.close()
 
+    def test_drag_repaints_only_rows_under_the_old_and_new_mark(self) -> None:
+        from unittest import mock
+
+        from gmail_tui import tui
+
+        class Screen:
+            def __init__(self) -> None:
+                self.rows: list[int] = []
+
+            def getmaxyx(self):
+                return (30, 80)
+
+            def addnstr(self, y, *_args):
+                self.rows.append(y)
+
+            def chgat(self, *_args):
+                pass
+
+            def refresh(self):
+                pass
+
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            session.painted = [f"row {y}" for y in range(29)]
+            session.mark_press(10, 2)
+            session.mark_rows = (10, 10)
+            session.mark_drag(12, 5)
+            screen = Screen()
+            with mock.patch.object(curses, "putp", lambda _b: None):
+                tui._paint_mark(screen, session, 0)
+            self.assertEqual(set(screen.rows), {10, 11, 12})
+            self.assertEqual(session.mark_rows, (10, 12))
+
+            session.mark_drag(10, 7)
+            screen.rows.clear()
+            with mock.patch.object(curses, "putp", lambda _b: None):
+                tui._paint_mark(screen, session, 0)
+            # Rows 11 and 12 still carry the old highlight and must be rewritten.
+            self.assertEqual(set(screen.rows), {10, 11, 12})
+            self.assertEqual(session.mark_rows, (10, 10))
+        finally:
+            engine.store.close()
+
+    def test_queued_drag_motion_is_applied_before_painting(self) -> None:
+        from unittest import mock
+
+        from gmail_tui import tui
+
+        class Screen:
+            def __init__(self, keys) -> None:
+                self.keys = list(keys)
+
+            def timeout(self, _ms):
+                pass
+
+            def get_wch(self):
+                if not self.keys:
+                    raise curses.error
+                return self.keys.pop(0)
+
+        motion = getattr(curses, "REPORT_MOUSE_POSITION", 0)
+        events = iter([(0, 9, 4, 0, motion), (0, 20, 6, 0, motion)])
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            session.mark_press(2, 3)
+            pending: list = []
+            screen = Screen([curses.KEY_MOUSE, curses.KEY_MOUSE, "j"])
+            with mock.patch.object(curses, "getmouse", lambda: next(events)):
+                chosen = tui._drain_motion(screen, session, pending)
+            self.assertIsNone(chosen)
+            self.assertEqual(session.mark_end, (6, 20))
+            self.assertEqual(pending, ["j"])
+        finally:
+            engine.store.close()
+
     def test_plain_text_is_shown_and_html_keeps_its_shape(self) -> None:
         both = (
             "Subject: Both\r\n"
@@ -1896,6 +1973,28 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(session.message_cursor, 0)
             self.assertEqual(session.messages[0].gmail_id, held)
             self.assertEqual(session.message_scroll, 0)
+        finally:
+            engine.store.close()
+
+    def test_tab_counts_stay_put_when_switching_to_an_account(self) -> None:
+        from types import SimpleNamespace
+
+        from gmail_tui import tui
+
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            inbox, unread = session.inbox_count, session.inbox_unread
+            # Background sync stores more mail while the tab is not open.
+            self._arrive("second", 20_000)
+            self._arrive("third", 30_000)
+            tab = Account("me@gmail.com", Path(self.tmp.name), 0, 0)
+            slot = SimpleNamespace(engine=engine, session=session, job=SimpleNamespace(mail_alert=0))
+            tui._remember(None, tab, slot)
+            self.assertEqual((tab.inbox, tab.unread), (inbox + 2, unread + 2))
+            # Once the tab is open its badge comes from the session.
+            header = render_lines(session, 30, 100, [tab], 0)[0]
+            self.assertIn(f"{unread + 2} [{inbox + 2}]", header)
         finally:
             engine.store.close()
 
