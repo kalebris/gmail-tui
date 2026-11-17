@@ -28,12 +28,19 @@ from pathlib import Path
 from gmail_tui.accounts import Account
 from gmail_tui.gmail import GmailError, Offline
 from gmail_tui.labels import FlatLabel, TreeNode, build_label_tree, expandable_keys, flatten
-from gmail_tui.links import LABEL, link_spans, present_links
+from gmail_tui.links import LABEL, link_spans, present_links, strip_link_urls
 from gmail_tui.search import parse_query
 from gmail_tui.snooze import SnoozeChoice, parse_duration, presets as snooze_presets
 from gmail_tui.store import HeldChange, MessagePreview, MessageSummary, ThreadCursor
 from gmail_tui.sixel import IMAGE_LIMIT, band_rows, image_band, is_bitmap
-from gmail_tui.textutil import Attachment, MimePart, preferred_mime_index, reserve_download, safe_filename
+from gmail_tui.textutil import (
+    Attachment,
+    MimePart,
+    header_fields,
+    preferred_mime_index,
+    reserve_download,
+    safe_filename,
+)
 from gmail_tui.threads import arrange, bare_subject
 from gmail_tui.sync import Engine
 from gmail_tui.terminal import launch_editor
@@ -132,6 +139,11 @@ class MailSession:
         self.mime_parts: tuple[MimePart, ...] = ()
         self.mime_cursor = 0
         self._mime_gmail_id = ""
+        self.full_headers = False
+        self.raw_source = False
+        self._raw_gmail_id = ""
+        self._source: tuple[str, bytes, list[tuple[str, str]] | None] | None = None
+        self._header_rows = 5
         self.sixel = False
         self.sixel_cell = (8, 16)
         self.sixel_pixels = (0, 0)
@@ -169,6 +181,8 @@ class MailSession:
         self._reader_width = 0
         self._reader_term = 0
         self._reader_left = 0
+        self._reader_hidden = False
+        self.hide_urls = False
         self.visible: list[FlatLabel] = []
         self.expanded: set[str] = set()
         self.needs_fetch = False
@@ -336,34 +350,33 @@ class MailSession:
             return
         index = _list_cursor_for(self.messages, row_id, gmail_id, thread_id, kept_cursor)
         self.message_cursor = index
-        # Keeping the same window offset after rows appear above the selection
-        # would push those new rows off the top of the pane.
         shifted = max(0, index - kept_cursor)
         desired = index - max(0, kept_row)
-        if self.newest_first and shifted:
+        # At the top of the list, let rows that arrived above the selection
+        # show up there. Scrolled further down, the selected row keeps its
+        # place on screen so a busy inbox does not slide under the reader.
+        if self.newest_first and shifted and kept_cursor - kept_row <= 0:
             desired -= shifted
         self.message_scroll = max(0, desired)
 
     def _pin_new_mail(self, previous: list[MessageSummary]) -> None:
-        """Scroll so newly arrived rows are on screen after a new-mail bump."""
+        """Bring new mail into view when that keeps the selected row on screen.
+
+        The selection itself never moves: arrivals must not change the open
+        message while someone is reading or about to act on it.
+        """
         if not self.messages:
             return
-        new_indexes = _new_mail_indexes(previous, self.messages)
         window = max(1, self.message_window)
         if self.newest_first:
-            # Arrivals land at the top. Even when a prior refresh already merged
-            # them into ``previous``, still expose the top of the list.
-            if new_indexes:
-                self.message_cursor = min(new_indexes)
-            self.message_scroll = 0
-            if self.message_cursor >= window:
-                self.message_cursor = 0
-        else:
-            if new_indexes:
-                self.message_cursor = max(new_indexes)
-            else:
-                self.message_cursor = len(self.messages) - 1
-            self.message_scroll = max(0, self.message_cursor - window + 1)
+            if self.message_cursor < window:
+                self.message_scroll = 0
+            return
+        new_indexes = _new_mail_indexes(previous, self.messages)
+        bottom = max(new_indexes) if new_indexes else len(self.messages) - 1
+        wanted = max(0, bottom - window + 1)
+        if wanted <= self.message_cursor:
+            self.message_scroll = max(self.message_scroll, wanted)
 
     def move(self, delta: int) -> None:
         if delta == 0:
@@ -538,6 +551,7 @@ class MailSession:
             self.focus = "list"
             return
         if not right:
+            self.close_raw_source()
             self.focus = "list"
 
     def cycle(self, backward: bool = False) -> None:
@@ -994,18 +1008,36 @@ class MailSession:
         width = max(1, width)
         term_width = max(width, term_width or width)
         left = max(0, min(left, term_width - 1))
+        hide = self._hiding_urls()
         if (
             width == self._reader_width
             and term_width == self._reader_term
             and left == self._reader_left
+            and hide == self._reader_hidden
         ):
             return
         self.reader_view, self._reader_starts, self.reader_marks = layout_reader(
-            self.reader, width, term_width, left
+            self.reader, width, term_width, left, hide_urls=hide
         )
         self._reader_width = width
         self._reader_term = term_width
         self._reader_left = left
+        self._reader_hidden = hide
+
+    def toggle_urls(self) -> None:
+        """Hide link addresses. The word link stays and still opens the URL."""
+        self.hide_urls = not self.hide_urls
+        self.notice = "link addresses hidden" if self.hide_urls else "link addresses shown"
+
+    def _hiding_urls(self) -> bool:
+        # The raw source view promises every byte of the message.
+        return self.hide_urls and not self.raw_source
+
+    def _find_text(self, line: str) -> str:
+        """The part of a reader line that is on screen, for find."""
+        if self._hiding_urls() and "link " in line:
+            return strip_link_urls(_plain(line))[0]
+        return line
 
     def begin_search(self) -> None:
         self._remember()
@@ -1164,8 +1196,70 @@ class MailSession:
             return False
         self.close_attachments()
         self.close_mime()
+        self.close_raw_source()
         self.focus = "list"
         return True
+
+    def toggle_headers(self) -> None:
+        """Show every header field of the open message, or only the short set."""
+        self.full_headers = not self.full_headers
+        if not self.full_headers:
+            self.notice = "short headers"
+        elif self.messages and self._message_source(self.messages[self.message_cursor].gmail_id) is None:
+            self.notice = "all headers once the body is downloaded"
+        else:
+            self.notice = "all headers"
+        self._refresh_open_reader(scroll=0)
+
+    def toggle_raw_source(self) -> None:
+        """Show the whole saved message: every header, MIME boundary, and encoded part."""
+        if self.raw_source:
+            self.close_raw_source()
+            return
+        if not self.messages:
+            return
+        gmail_id = self.messages[self.message_cursor].gmail_id
+        if self._message_source(gmail_id) is None:
+            self.notice = "body not downloaded"
+            return
+        self.close_attachments()
+        self.close_mime()
+        self.raw_source = True
+        self._raw_gmail_id = gmail_id
+        self.focus = "reader"
+        self.notice = ""
+        self._refresh_open_reader(scroll=0)
+
+    def close_raw_source(self) -> None:
+        if not self.raw_source:
+            return
+        self.raw_source = False
+        self._refresh_open_reader(scroll=0)
+
+    def _refresh_open_reader(self, scroll: int | None = None) -> None:
+        if not self.messages:
+            return
+        preview = self.engine.store.preview_message(self.messages[self.message_cursor].gmail_id)
+        kept = self.reader_scroll if scroll is None else scroll
+        self._set_reader(self._reader_for(preview))
+        self.reader_scroll = kept
+
+    def _message_source(self, gmail_id: str) -> bytes | None:
+        # Gmail never rewrites a message, so one copy per id stays valid.
+        if self._source is not None and self._source[0] == gmail_id:
+            return self._source[1]
+        raw = self.engine.store.message_source(gmail_id)
+        if raw is not None:
+            self._source = (gmail_id, raw, None)
+        return raw
+
+    def _header_fields(self, gmail_id: str) -> list[tuple[str, str]] | None:
+        raw = self._message_source(gmail_id)
+        if raw is None or self._source is None:
+            return None
+        if self._source[2] is None:
+            self._source = (gmail_id, raw, header_fields(raw))
+        return self._source[2]
 
     def clear_search(self) -> bool:
         """Show the folder again. False when the list is not a search."""
@@ -1309,8 +1403,7 @@ class MailSession:
 
     def _lines_above_image(self) -> int:
         """Header and attachment rows that stay above the picture."""
-        # From, To, Date, Subject, Labels
-        above = 5
+        above = self._header_rows
         if self.mime_parts:
             above += 1 + len(self.mime_parts)
         else:
@@ -1356,11 +1449,23 @@ class MailSession:
         else:
             self.mime_cursor = 0
         mime_index = self.mime_parts[self.mime_cursor].index if self.mime_parts else None
+        if self.raw_source and gmail_id and gmail_id == self._raw_gmail_id:
+            raw = self._message_source(gmail_id)
+            if raw is not None:
+                self.image_slots = []
+                return format_source(raw)
+        self.raw_source = False
+        headers = None
+        if self.full_headers and preview is not None and preview.body_cached:
+            headers = self._header_fields(gmail_id)
+        # Labels sits under the header block either way.
+        self._header_rows = len(headers) + 1 if headers else 5
         lines = format_reader(
             preview,
             selected,
             mime_index,
             mime_focus=self.focus == "mime",
+            headers=headers,
         )
         preferred = self._preferred_image()
         self.image_rows = self._image_band_rows()
@@ -2063,7 +2168,11 @@ class MailSession:
             self.reader_scroll = self._saved_reader_scroll
             return
         lowered = query.lower()
-        self._find_lines = [index for index, line in enumerate(self.reader) if lowered in line.lower()]
+        self._find_lines = [
+            index
+            for index, line in enumerate(self.reader)
+            if lowered in self._find_text(line).lower()
+        ]
         if not self._find_lines:
             self.find_line = None
             self.prompt_hint = "0"
@@ -2463,12 +2572,18 @@ def _wrap_columns(text: str, width: int, *, ascii_text: bool) -> list[tuple[int,
 
 
 def layout_reader(
-    lines: list[str], pane: int, term: int = 0, left: int = 0
+    lines: list[str],
+    pane: int,
+    term: int = 0,
+    left: int = 0,
+    *,
+    hide_urls: bool = False,
 ) -> tuple[list[str], list[int], list[ReaderMark]]:
     """Wrap reader lines inside the pane and note each ``link`` word.
 
     ``term`` and ``left`` are unused. Long URLs wrap inside the pane like any
-    other line. The word link still carries the whole address.
+    other line. The word link still carries the whole address. With
+    ``hide_urls`` only that word is drawn; the address lives in the hyperlink.
     """
     del term, left
     pane = max(1, pane)
@@ -2478,11 +2593,16 @@ def layout_reader(
     for line in lines:
         starts.append(len(view))
         plain = _plain(line)
+        urls: list[tuple[int, str]] = []
+        if "link " in plain:
+            if hide_urls:
+                plain, urls = strip_link_urls(plain)
+            else:
+                urls = [(start, url) for start, _end, url in link_spans(plain)]
         pieces = _wrap_spans(plain, pane)
-        urls = link_spans(plain) if "link " in plain else ()
         for begin, _end, piece in pieces:
             row_links: list[tuple[int, str]] = []
-            for start, _url_end, url in urls:
+            for start, url in urls:
                 local = start - begin
                 if local < 0 or local >= len(piece):
                     continue
@@ -2523,7 +2643,7 @@ def reader_match(session: MailSession, width: int) -> tuple[int, int, str] | Non
         return None
     if session.find_line < 0 or session.find_line >= len(session.reader):
         return None
-    line = _plain(session.reader[session.find_line])
+    line = _plain(session._find_text(session.reader[session.find_line]))
     start = line.lower().find(session.find_query.lower())
     if start < 0:
         return None
@@ -2551,16 +2671,22 @@ def format_reader(
     mime: int | None = None,
     *,
     mime_focus: bool = False,
+    headers: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     if preview is None:
         return ["(no message)"]
-    when = format_when(preview.internal_date_ms)
     labels = ", ".join(preview.label_names) or "(none)"
+    if headers:
+        top = [f"{name}: {value}" for name, value in headers]
+    else:
+        top = [
+            f"From: {preview.from_addr}",
+            f"To: {preview.to_addr}",
+            f"Date: {format_when(preview.internal_date_ms)}",
+            f"Subject: {preview.subject}",
+        ]
     lines = [
-        f"From: {preview.from_addr}",
-        f"To: {preview.to_addr}",
-        f"Date: {when}",
-        f"Subject: {preview.subject}",
+        *top,
         f"Labels: {labels}",
         *_mime_lines(preview, mime, mime_focus=mime_focus),
         *_attachment_lines(preview, attachment),
@@ -2587,6 +2713,11 @@ def format_reader(
     else:
         lines.append("(body not downloaded)")
     return lines
+
+
+def format_source(raw: bytes) -> list[str]:
+    """The saved message as text, line for line. Nothing is decoded or hidden."""
+    return raw.decode("utf-8", errors="replace").splitlines() or ["(empty message)"]
 
 
 def _mime_lines(
@@ -3146,6 +3277,9 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("reply", "reply to the sender"),
         ("attachments", "list attachments"),
         ("mime-parts", "choose a MIME part"),
+        ("raw-source", "show the raw message source"),
+        ("headers", "show all header fields"),
+        ("urls", "hide or show link addresses"),
         ("holding", "mail waiting to be sent"),
         ("undo", "undo the last change"),
         ("quit", "quit"),
@@ -3167,6 +3301,10 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("attachments", "list attachments"),
         ("mime-parts", "choose a MIME part"),
         ("view-image", "show the selected picture"),
+        ("raw-source", "show or hide the raw message source"),
+        ("headers", "show all header fields, or only the short set"),
+        ("urls", "hide or show link addresses (the word link still opens them)"),
+        ("escape", "leave the raw source"),
         ("archive", "archive"),
         ("snooze", "snooze until later"),
         ("delete", "delete"),
@@ -3457,6 +3595,8 @@ def format_activity(session: MailSession, width: int) -> str:
         parts.append("enter saves")
     if session.focus == "mime":
         parts.append("j/k switches MIME  enter opens HTML")
+    if session.raw_source:
+        parts.append("raw source  esc returns")
     if session.notice:
         parts.append(session.notice)
     return _clip("  ".join(parts), max(0, width - 1))

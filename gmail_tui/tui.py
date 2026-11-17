@@ -654,6 +654,8 @@ def _loop(
                 session.close_attachments()
             elif session.focus == "mime":
                 session.close_mime()
+            elif session.raw_source:
+                session.close_raw_source()
             elif session.external is not None:
                 session.forget_external_edit()
             continue
@@ -798,6 +800,15 @@ def _loop(
             continue
         if action == "view-image":
             session.begin_view_image()
+            continue
+        if action == "raw-source":
+            session.toggle_raw_source()
+            continue
+        if action == "headers":
+            session.toggle_headers()
+            continue
+        if action == "urls":
+            session.toggle_urls()
             continue
         if action == "compose":
             if session.external is not None:

@@ -1468,6 +1468,17 @@ class Store:
         destination.write_bytes(found[1])
         return destination
 
+    def message_source(self, gmail_id: str) -> bytes | None:
+        """The saved RFC822 message exactly as Gmail sent it. None when not on disk."""
+        if not self.body_readable(gmail_id):
+            return None
+        row = self._message_row(gmail_id)
+        assert row is not None
+        try:
+            return (self.root / str(row["body_path"])).read_bytes()
+        except OSError:
+            return None
+
     def attachment_bytes(self, gmail_id: str, index: int) -> bytes | None:
         """The bytes of one saved attachment. None when the body is not on disk."""
         row = self._message_row(gmail_id)

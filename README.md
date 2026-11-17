@@ -293,6 +293,9 @@ in `~/.config/gmail-tui/keys` (or via Nix `programs.gmail-tui.keys`).
 | attachments | `A` |
 | mime-parts | `m` |
 | view-image | `v` |
+| raw-source (whole message as saved) | `V` |
+| headers (all header fields / short set) | `F` |
+| urls (hide / show link addresses) | `L` |
 | undo | `U` |
 | next-account | `]` |
 | prev-account | `[` |
@@ -338,6 +341,8 @@ snooze, inbox, help.
 | `C` | open the calendar |
 | `r` / `R` | reply-all / reply |
 | `A` / `m` | attachments / MIME parts |
+| `V` / `F` | raw source / all header fields of the selected mail |
+| `L` | hide or show link addresses in the reader |
 | `H` | mail waiting to be sent |
 | `U` | undo |
 | `q` | quit (clears an active search first) |
@@ -353,6 +358,9 @@ snooze, inbox, help.
 | `C` | open the calendar |
 | `r` / `R` | reply-all / reply |
 | `A` / `m` / `v` | attachments / MIME parts / show picture |
+| `V` | raw message source (every header, MIME boundary, encoded part); `V` or `Esc` returns |
+| `F` | show all header fields, or back to From/To/Date/Subject (stays on for later messages) |
+| `L` | hide link addresses: only the word `link` stays, and it still opens the URL in terminals with OSC 8 hyperlinks (foot, kitty, Alacritty, …); `L` again shows them |
 | `a`/`e`, `b`, `d`, `l`, `u`, `n`, `U`, `H` | archive, snooze, delete, label, unread, undo, holding |
 
 `c`, `r`, and `R` open `$EDITOR` in a new terminal (`GMAIL_TUI_TERMINAL` is that command; otherwise kitty, foot, alacritty, and the other common terminals). This window keeps running, so other mail can be read while the message is written. When the editor exits, a dialog offers Send or Save as draft. Drag with the mouse to highlight text; the selection is copied.

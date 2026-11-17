@@ -81,6 +81,24 @@ def link_spans(line: str) -> list[tuple[int, int, str]]:
     return found
 
 
+def strip_link_urls(line: str) -> tuple[str, list[tuple[int, str]]]:
+    """``line`` with each ``link <url>`` cut down to ``link``, and ``(start, url)`` per word."""
+    pieces: list[str] = []
+    found: list[tuple[int, str]] = []
+    size = 0
+    last = 0
+    for start, end, url in link_spans(line):
+        head = line[last:start]
+        pieces.append(head)
+        size += len(head)
+        found.append((size, url))
+        pieces.append(LABEL)
+        size += len(LABEL)
+        last = end
+    pieces.append(line[last:])
+    return "".join(pieces), found
+
+
 def _urls(text: str) -> list[tuple[int, int, str]]:
     found: list[tuple[int, int, str]] = []
     for match in _URL.finditer(text):

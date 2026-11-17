@@ -11,7 +11,7 @@ from gmail_tui.gmail import NullGmail
 from gmail_tui.http_gmail import parse_batch_response, parse_history_page, parse_message
 from gmail_tui.search import parse_query
 from gmail_tui.sync import Engine
-from gmail_tui.textutil import parse_rfc822
+from gmail_tui.textutil import header_fields, parse_rfc822
 
 
 class SearchParseTests(unittest.TestCase):
@@ -75,6 +75,25 @@ class HttpParseTests(unittest.TestCase):
         self.assertEqual(message.raw, raw)
         self.assertEqual(message.label_ids, ["INBOX"])
         self.assertFalse(message.has_attachment)
+
+    def test_header_fields_keep_order_and_decode_each_value(self) -> None:
+        raw = (
+            b"Received: from a.example\r\n\tby b.example\r\n"
+            b"Received: from c.example\r\n"
+            b"Subject: =?utf-8?q?Caf=C3=A9?=\r\n"
+            b"X-Odd: caf\xe9\r\n"
+            b"\r\n"
+            b"body\r\n"
+        )
+        fields = header_fields(raw)
+        self.assertEqual(
+            [name for name, _value in fields], ["Received", "Received", "Subject", "X-Odd"]
+        )
+        self.assertEqual(fields[0][1], "from a.example by b.example")
+        self.assertEqual(fields[2][1], "Café")
+        self.assertNotIn("body", " ".join(value for _name, value in fields))
+        # Undecodable 8-bit bytes become a replacement mark, not a lone surrogate.
+        fields[3][1].encode("utf-8")
 
     def test_a_raw_message_is_parsed_once_and_kept(self) -> None:
         raw = b"Subject: Hello\r\nFrom: Ada <ada@example.com>\r\n\r\nplatypus lives\r\n"

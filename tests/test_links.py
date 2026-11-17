@@ -2,7 +2,7 @@
 
 import unittest
 
-from gmail_tui.links import osc8, present_links
+from gmail_tui.links import osc8, present_links, strip_link_urls
 from gmail_tui.store import MessagePreview
 from gmail_tui.ui import _display_width, format_reader, layout_reader, reader_hyperlinks
 
@@ -52,6 +52,28 @@ class LinkLayoutTests(unittest.TestCase):
         self.assertEqual(marks[0].links, ((0, url),))
         writes = reader_hyperlinks(view, marks, 0, top=4, pane_left=10, rows=8, term=50)
         self.assertEqual(writes, [(4, 10, "link", url)])
+
+    def test_hidden_urls_keep_only_the_word_and_its_target(self) -> None:
+        line = present_links("see https://example.com/a and https://example.org/b now")
+        stripped, found = strip_link_urls(line)
+        self.assertEqual(stripped, "see link and link now")
+        self.assertEqual(found, [(4, "https://example.com/a"), (13, "https://example.org/b")])
+        view, _starts, marks = layout_reader([line], 80, hide_urls=True)
+        self.assertEqual(view, ["see link and link now"])
+        self.assertEqual(
+            marks[0].links, ((4, "https://example.com/a"), (13, "https://example.org/b"))
+        )
+        writes = reader_hyperlinks(view, marks, 0, top=2, pane_left=1, rows=5, term=80)
+        self.assertEqual(
+            writes,
+            [(2, 5, "link", "https://example.com/a"), (2, 14, "link", "https://example.org/b")],
+        )
+
+    def test_a_hidden_long_url_takes_one_word(self) -> None:
+        url = "https://example.com/" + ("a" * 80)
+        view, _starts, marks = layout_reader([present_links(url)], 30, hide_urls=True)
+        self.assertEqual(view, ["link"])
+        self.assertEqual(marks[0].links, ((0, url),))
 
     def test_reader_shows_the_url_after_link(self) -> None:
         preview = MessagePreview(

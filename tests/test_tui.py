@@ -52,6 +52,7 @@ from gmail_tui.ui import (
     message_row,
     render_lines,
     parse_draft,
+    reader_match,
     reply_draft,
     status_bar,
     wrap_lines,
@@ -924,6 +925,169 @@ class MailboxTests(unittest.TestCase):
         finally:
             engine.store.close()
 
+    def _open_full(self, engine: Engine) -> MailSession:
+        raw = (
+            "Received: from relay.example\r\n"
+            "X-Mailer: Test Mailer\r\n"
+            "Subject: =?utf-8?q?Caf=C3=A9?=\r\n"
+            "From: Ada <ada@example.com>\r\n"
+            "To: me@gmail.com\r\n"
+            "\r\n"
+            "FULL BODY\r\n"
+        ).encode()
+        message = IncomingMessage(
+            gmail_id="full1",
+            thread_id="tfull",
+            label_ids=["INBOX"],
+            internal_date_ms=9_500,
+            subject="Café",
+            from_addr="Ada <ada@example.com>",
+            to_addr="me@gmail.com",
+        )
+        self.store.upsert_metadata(message, "missing")
+        self.store.write_body(message, raw, "FULL BODY")
+        session = MailSession(engine)
+        session.focus = "list"
+        session.load_messages(fetch=False)
+        for index, item in enumerate(session.messages):
+            if item.gmail_id == "full1":
+                session.message_cursor = index
+                break
+        session.load_reader(fetch=False)
+        return session
+
+    def test_headers_toggle_shows_every_field(self) -> None:
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = self._open_full(engine)
+            short = "\n".join(session.reader)
+            self.assertNotIn("X-Mailer", short)
+            self.assertIn("Labels:", short)
+            session.toggle_headers()
+            full = "\n".join(session.reader)
+            self.assertIn("Received: from relay.example", full)
+            self.assertIn("X-Mailer: Test Mailer", full)
+            self.assertIn("Subject: Café", full)
+            self.assertIn("Labels:", full)
+            self.assertIn("FULL BODY", full)
+            self.assertEqual(session.notice, "all headers")
+            # Sticky: another message opened later keeps the full set.
+            session.load_reader(fetch=False)
+            self.assertIn("X-Mailer: Test Mailer", "\n".join(session.reader))
+            session.toggle_headers()
+            self.assertNotIn("X-Mailer", "\n".join(session.reader))
+        finally:
+            engine.store.close()
+
+    def test_raw_source_shows_the_message_as_saved(self) -> None:
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = self._open_full(engine)
+            session.toggle_raw_source()
+            self.assertTrue(session.raw_source)
+            self.assertEqual(session.focus, "reader")
+            raw = "\n".join(session.reader)
+            self.assertIn("Subject: =?utf-8?q?Caf=C3=A9?=", raw)
+            self.assertIn("X-Mailer: Test Mailer", raw)
+            self.assertIn("FULL BODY", raw)
+            self.assertNotIn("Labels:", raw)
+            self.assertIn("raw source", status_bar(session, 120))
+            session.toggle_raw_source()
+            self.assertFalse(session.raw_source)
+            self.assertIn("Subject: Café", "\n".join(session.reader))
+            session.toggle_raw_source()
+            self.assertTrue(session.leave_message())
+            self.assertFalse(session.raw_source)
+            self.assertEqual(session.focus, "list")
+            self.assertNotIn("=?utf-8?q?", "\n".join(session.reader))
+        finally:
+            engine.store.close()
+
+    def test_hidden_urls_toggle_in_the_reader_and_find_follows(self) -> None:
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            message = IncomingMessage(
+                gmail_id="url1",
+                thread_id="turl",
+                label_ids=["INBOX"],
+                internal_date_ms=9_700,
+                subject="Links",
+                from_addr="Ada <ada@example.com>",
+                to_addr="me@gmail.com",
+            )
+            body = "Notes at https://example.com/notes-page here"
+            raw = (
+                f"Subject: Links\r\nFrom: Ada <ada@example.com>\r\nTo: me@gmail.com\r\n\r\n{body}\r\n"
+            ).encode()
+            self.store.upsert_metadata(message, "missing")
+            self.store.write_body(message, raw, body)
+            session = MailSession(engine)
+            session.focus = "list"
+            session.load_messages(fetch=False)
+            for index, item in enumerate(session.messages):
+                if item.gmail_id == "url1":
+                    session.message_cursor = index
+                    break
+            session.load_reader(fetch=False)
+            geo = geometry(30, 100)
+            session.reveal(geo)
+            self.assertIn("Notes at link https://example.com/notes-page here", session.reader_view)
+
+            session.toggle_urls()
+            session.reveal(geo)
+            self.assertIn("Notes at link here", session.reader_view)
+            row = session.reader_view.index("Notes at link here")
+            self.assertEqual(session.reader_marks[row].links, ((9, "https://example.com/notes-page"),))
+
+            # Find only matches what is on screen, and highlights where it is drawn.
+            session.focus = "reader"
+            session.begin_search()
+            session.prompt_text = "notes-page"
+            session._apply_reader_find()
+            self.assertIsNone(session.find_line)
+            session.prompt_text = "here"
+            session._apply_reader_find()
+            match = reader_match(session, geo.width - 2)
+            self.assertIsNotNone(match)
+            assert match is not None
+            self.assertEqual(match[1], len("Notes at link "))
+
+            # Raw source never hides anything.
+            session.prompt = None
+            session.toggle_raw_source()
+            session.reveal(geo)
+            self.assertTrue(any("https://example.com/notes-page" in line for line in session.reader_view))
+        finally:
+            engine.store.close()
+
+    def test_raw_source_needs_the_downloaded_body(self) -> None:
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            message = IncomingMessage(
+                gmail_id="bare1",
+                thread_id="tbare",
+                label_ids=["INBOX"],
+                internal_date_ms=9_600,
+                subject="Bare",
+                from_addr="Ada <ada@example.com>",
+                to_addr="me@gmail.com",
+            )
+            self.store.upsert_metadata(message, "missing")
+            session = MailSession(engine)
+            session.focus = "list"
+            session.load_messages(fetch=False)
+            for index, item in enumerate(session.messages):
+                if item.gmail_id == "bare1":
+                    session.message_cursor = index
+                    break
+            session.load_reader(fetch=False)
+            session.toggle_raw_source()
+            self.assertFalse(session.raw_source)
+            self.assertEqual(session.notice, "body not downloaded")
+            self.assertIsNone(engine.store.message_source("bare1"))
+        finally:
+            engine.store.close()
+
     def test_mime_list_lets_you_switch_the_body(self) -> None:
         engine = Engine.open(self.tmp.name, NullGmail())
         try:
@@ -1635,6 +1799,7 @@ class MailboxTests(unittest.TestCase):
             session.focus = "list"
             job = BackgroundSync(engine)
             session.observe(job)
+            held = session.messages[session.message_cursor].gmail_id
             self._message(
                 "late",
                 "t-late",
@@ -1650,14 +1815,26 @@ class MailboxTests(unittest.TestCase):
             session._refreshed_at = time.monotonic()
             session.observe(job)
             self.assertEqual(session.messages[0].subject, "Late arrival")
-            self.assertEqual(session.messages[session.message_cursor].subject, "Late arrival")
+            self.assertEqual(session.messages[session.message_cursor].gmail_id, held)
             self.assertEqual(session.message_scroll, 0)
             self.assertFalse(job.dirty)
             self.assertFalse(job.list_bump)
         finally:
             engine.store.close()
 
-    def test_new_mail_scrolls_into_view_for_newest_and_oldest(self) -> None:
+    def _arrive(self, gmail_id: str, date: int) -> None:
+        self._message(
+            gmail_id,
+            f"t-{gmail_id}",
+            date,
+            f"Arrived {gmail_id}",
+            "Cy <cy@example.com>",
+            "me@gmail.com",
+            ["INBOX", "UNREAD"],
+            "hi",
+        )
+
+    def test_new_mail_never_moves_the_selection(self) -> None:
         for number in range(8):
             self._message(
                 f"vis{number}",
@@ -1674,44 +1851,51 @@ class MailboxTests(unittest.TestCase):
             session = MailSession(engine)
             session.focus = "list"
             session.message_window = 3
+
+            # Newest first, scrolled down: the selected row keeps its screen row.
+            session.refresh_view()
             session.message_cursor = 4
             session.message_scroll = 3
-            self._message(
-                "arrive-new",
-                "t-arrive-new",
-                99_000,
-                "Arrive newest",
-                "Cy <cy@example.com>",
-                "me@gmail.com",
-                ["INBOX", "UNREAD"],
-                "hi",
-            )
+            held = session.messages[4].gmail_id
+            self._arrive("new1", 99_000)
             session.refresh_view(pin_new_mail=True)
-            self.assertEqual(session.messages[0].subject, "Arrive newest")
-            self.assertEqual(session.message_cursor, 0)
+            self.assertEqual(session.messages[0].gmail_id, "new1")
+            self.assertEqual(session.messages[session.message_cursor].gmail_id, held)
+            self.assertEqual(session.message_cursor - session.message_scroll, 1)
+
+            # Newest first, near the top: arrivals show up, selection unchanged.
+            session.message_cursor = 1
+            session.message_scroll = 0
+            held = session.messages[1].gmail_id
+            self._arrive("new2", 99_100)
+            session.refresh_view(pin_new_mail=True)
+            self.assertEqual(session.messages[0].gmail_id, "new2")
+            self.assertEqual(session.messages[session.message_cursor].gmail_id, held)
             self.assertEqual(session.message_scroll, 0)
 
+            # Oldest first, near the bottom: the arrival scrolls into view.
             session.toggle_order()
             self.assertFalse(session.newest_first)
+            last = len(session.messages) - 1
+            session.message_cursor = last - 1
+            session.message_scroll = last - 2
+            held = session.messages[session.message_cursor].gmail_id
+            self._arrive("old1", 100_000)
+            session.refresh_view(pin_new_mail=True)
+            self.assertEqual(session.messages[-1].gmail_id, "old1")
+            self.assertEqual(session.messages[session.message_cursor].gmail_id, held)
+            self.assertEqual(session.message_scroll, len(session.messages) - 3)
+
+            # Oldest first, at the top: nothing on screen moves.
             session.message_cursor = 0
             session.message_scroll = 0
-            self._message(
-                "arrive-old",
-                "t-arrive-old",
-                100_000,
-                "Arrive oldest",
-                "Cy <cy@example.com>",
-                "me@gmail.com",
-                ["INBOX", "UNREAD"],
-                "hi",
-            )
+            held = session.messages[0].gmail_id
+            self._arrive("old2", 100_100)
             session.refresh_view(pin_new_mail=True)
-            self.assertEqual(session.messages[-1].subject, "Arrive oldest")
-            self.assertEqual(session.message_cursor, len(session.messages) - 1)
-            self.assertEqual(
-                session.message_scroll,
-                max(0, session.message_cursor - session.message_window + 1),
-            )
+            self.assertEqual(session.messages[-1].gmail_id, "old2")
+            self.assertEqual(session.message_cursor, 0)
+            self.assertEqual(session.messages[0].gmail_id, held)
+            self.assertEqual(session.message_scroll, 0)
         finally:
             engine.store.close()
 

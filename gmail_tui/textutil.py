@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from email import policy
 from email.message import EmailMessage
-from email.parser import BytesParser
+from email.parser import BytesHeaderParser, BytesParser
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -118,6 +118,24 @@ def parse_rfc822(raw: bytes) -> ParsedMail:
     if message is None:
         return ParsedMail(text=raw.decode("utf-8", errors="replace"))
     return _parsed_mail(message)
+
+
+def header_fields(raw: bytes) -> list[tuple[str, str]]:
+    """Every header of ``raw`` in file order, decoded and unfolded for display."""
+    try:
+        message = BytesHeaderParser(policy=policy.default).parsebytes(raw)
+    except Exception:
+        return []
+    fields: list[tuple[str, str]] = []
+    for name, value in message.raw_items():
+        try:
+            shown = str(policy.default.header_fetch_parse(name, value))
+        except Exception:
+            shown = str(value)
+        # 8-bit header bytes arrive as surrogate escapes, which curses cannot draw.
+        shown = shown.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+        fields.append((name, " ".join(shown.split())))
+    return fields
 
 
 def _bytes_message(raw: bytes) -> EmailMessage | None:
