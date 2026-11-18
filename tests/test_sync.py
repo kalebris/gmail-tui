@@ -20,7 +20,7 @@ from gmail_tui.gmail import (
     Offline,
     UNITS_GET,
 )
-from gmail_tui.http_gmail import HttpStatus, is_rate_limited
+from gmail_tui.http_gmail import HttpStatus, is_precondition_failed, is_rate_limited
 from gmail_tui.quota import Quota, SyncStopped
 from gmail_tui.sync import BackgroundSync, Engine, UrgentWork
 from gmail_tui.tui import _job_due, _service
@@ -1071,6 +1071,45 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(is_rate_limited(403, detail))
         self.assertTrue(is_rate_limited(429, "slow down"))
         self.assertFalse(is_rate_limited(403, "Insufficient Permission"))
+
+    def test_precondition_failures_are_retried_then_skipped_for_bodies(self) -> None:
+        self.assertTrue(is_precondition_failed(400, "Precondition check failed."))
+        self.assertTrue(
+            is_precondition_failed(
+                400,
+                '{"error":{"status":"FAILED_PRECONDITION","message":"Precondition check failed."}}',
+            )
+        )
+        self.assertFalse(is_precondition_failed(400, "Invalid label"))
+        self.assertFalse(is_precondition_failed(403, "Precondition check failed."))
+
+        self.engine.startup()
+        self.engine.store.mark_body_missing("in1")
+        calls = {"n": 0}
+        original = self.engine.gmail.get_message
+
+        def flaky(message_id, format):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise HttpStatus(400, "Precondition check failed.")
+            return original(message_id, format)
+
+        self.engine.gmail.get_message = flaky  # type: ignore[method-assign]
+        self.assertTrue(self.engine._download_body("in1"))
+        self.assertEqual(calls["n"], 3)
+        self.assertTrue(self.engine.store.body_readable("in1"))
+
+        calls["n"] = 0
+
+        def always(_message_id, _format):
+            calls["n"] += 1
+            raise HttpStatus(400, "Precondition check failed.")
+
+        self.engine.store.mark_body_missing("ar1")
+        self.engine.gmail.get_message = always  # type: ignore[method-assign]
+        self.assertFalse(self.engine._download_body("ar1"))
+        self.assertEqual(calls["n"], 4)  # initial + 3 retries
+        self.assertFalse(self.engine.store.body_readable("ar1"))
 
 
 if __name__ == "__main__":

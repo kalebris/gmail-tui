@@ -37,7 +37,7 @@ from gmail_tui.gmail import (
     RateLimited,
 )
 from gmail_tui import profile
-from gmail_tui.http_gmail import HttpStatus
+from gmail_tui.http_gmail import HttpStatus, is_precondition_failed
 from gmail_tui.oauth import OAuthError
 from gmail_tui.quota import Quota, SyncStopped
 from gmail_tui.search import ParsedQuery, parse_query
@@ -407,6 +407,13 @@ class Engine:
                 profile.discard_message()
             _unlink(self.store.delete_message(gmail_id))
             return False
+        except GmailError as exc:
+            # A stubborn FAILED_PRECONDITION on one body must not park sync.
+            if tracing:
+                profile.discard_message()
+            if "temporary error" in str(exc).lower() or "precondition" in str(exc).lower():
+                return False
+            raise
         self._save_body(message)
         if tracing:
             profile.finish_message(gmail_id, len(message.raw or b""))
@@ -563,6 +570,14 @@ class Engine:
                 if not refreshed and _unauthorized(exc) and self.refresh_auth(force=True):
                     refreshed = True
                     continue
+                if is_precondition_failed(exc.code, str(exc)):
+                    attempts += 1
+                    if attempts <= 3:
+                        self.quota.backoff(attempts)
+                        continue
+                    raise GmailError(
+                        "Gmail had a temporary error (precondition); will retry"
+                    ) from exc
                 raise
             except RateLimited as exc:
                 attempts += 1

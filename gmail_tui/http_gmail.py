@@ -426,6 +426,10 @@ class HttpGmail:
             detail = _error_detail(data)
             if is_rate_limited(status, detail):
                 raise RateLimited(detail or message_id)
+            if is_precondition_failed(status, detail):
+                # Same intermittent fault as a lone messages.get; skip this id.
+                missing.append(message_id)
+                continue
             if status >= 400 or data is None:
                 raise GmailError(f"Gmail batch failed for {message_id} ({status})")
             if not data.get("id"):
@@ -486,6 +490,18 @@ def is_rate_limited(code: int, detail: str) -> bool:
         return True
     text = detail.lower()
     return code == 403 and ("per minute" in text or "userratelimitexceeded" in text)
+
+
+def is_precondition_failed(code: int, detail: str) -> bool:
+    """True for Gmail's intermittent ``FAILED_PRECONDITION`` responses.
+
+    Google often returns HTTP 400 with only ``Precondition check failed.``
+    Retries usually succeed; treating it as fatal parked the sync loop.
+    """
+    if code != 400:
+        return False
+    text = detail.lower().replace("_", " ").replace(".", " ")
+    return "precondition check failed" in text or "failed precondition" in text
 
 
 def _error_detail(data: dict[str, Any] | None) -> str:

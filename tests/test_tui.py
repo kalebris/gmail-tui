@@ -1814,8 +1814,8 @@ class MailboxTests(unittest.TestCase):
             ui.PAGE = previous
             engine.store.close()
 
-    def test_scrolling_up_stays_on_the_same_row_until_the_top_of_the_page(self) -> None:
-        for number in range(12):
+    def test_list_keeps_a_margin_while_more_mail_remains(self) -> None:
+        for number in range(20):
             self._message(
                 f"up{number}",
                 f"tu{number}",
@@ -1830,43 +1830,40 @@ class MailboxTests(unittest.TestCase):
         try:
             session = MailSession(engine)
             session.focus = "list"
-            window = 5
-            geo = Geometry(32, 100, 24, 14, 8, window, 6, 1)
-            session.message_cursor = 7
-            session.message_scroll = 4
-            session.reveal(geo)
-            session.move(-1)
-            session.reveal(geo)
-            self.assertEqual(session.message_cursor, 6)
-            self.assertEqual(session.message_scroll, 4)
-            held = session.messages[session.message_cursor].gmail_id
-            session.refresh_view()
-            session.reveal(geo)
-            self.assertEqual(session.messages[session.message_cursor].gmail_id, held)
-            self.assertEqual(session.message_cursor - session.message_scroll, 2)
-            top = session.message_scroll
-            while session.message_cursor > top:
-                session.move(-1)
-                session.reveal(geo)
-                self.assertEqual(session.message_scroll, top)
-            session.move(-1)
-            session.reveal(geo)
-            self.assertEqual(session.message_cursor, top - 1)
-            self.assertEqual(session.message_scroll, top - 1)
-            self.assertEqual(session.message_cursor - session.message_scroll, 0)
-            session.message_cursor = window - 1
+            window = 10
+            geo = Geometry(40, 100, 24, 20, 8, window, 6, 1)
+            session.message_window = window
+            session.message_cursor = 0
             session.message_scroll = 0
             session.reveal(geo)
-            session.move(1)
+            # Walk down: the highlight must not sit on the last screen row
+            # while more messages remain below.
+            for _ in range(15):
+                session.move(1)
+                session.reveal(geo)
+                row = session.message_cursor - session.message_scroll
+                more_below = (
+                    session.message_cursor < len(session.messages) - 1 or session._more
+                )
+                if more_below:
+                    self.assertLess(row, window - 1)
+                    self.assertGreaterEqual(window - 1 - row, 2)
+            # At the real end the last row may use the bottom of the viewport.
+            session.message_cursor = len(session.messages) - 1
+            session.message_scroll = max(0, len(session.messages) - window)
             session.reveal(geo)
-            self.assertEqual(session.message_cursor, window)
-            self.assertEqual(session.message_scroll, 1)
-            self.assertEqual(session.message_scroll + window - 1 - session.message_cursor, 0)
+            self.assertEqual(
+                session.message_cursor - session.message_scroll,
+                min(window - 1, len(session.messages) - 1),
+            )
+            # Walking up keeps a top margin while rows remain above.
+            session.message_cursor = 12
+            session.message_scroll = 8
+            session.reveal(geo)
             session.move(-1)
             session.reveal(geo)
-            self.assertEqual(session.message_cursor, window - 1)
-            self.assertEqual(session.message_scroll, 1)
-            self.assertEqual(session.message_cursor - session.message_scroll, window - 2)
+            self.assertGreater(session.message_cursor - session.message_scroll, 0)
+            self.assertGreater(session.message_scroll, 0)
         finally:
             engine.store.close()
 
@@ -2164,13 +2161,21 @@ class MailboxTests(unittest.TestCase):
                     session.messages[session.message_scroll + offset].gmail_id,
                     session.messages[session.message_cursor].gmail_id,
                 )
-            self.assertEqual(session.message_cursor - session.message_scroll, window - 1)
+                more_below = (
+                    session.message_cursor < len(session.messages) - 1 or session._more
+                )
+                if more_below:
+                    self.assertLess(offset, window - 1)
+            # Not yet on the last message: still keep at least one row below.
+            self.assertLess(session.message_cursor, len(session.messages) - 1)
+            self.assertLess(session.message_cursor - session.message_scroll, window - 1)
             for _ in range(6):
                 session.move(-1)
                 offset = session.message_cursor - session.message_scroll
                 self.assertGreaterEqual(offset, 0)
                 self.assertLess(offset, window)
-            self.assertEqual(session.message_cursor - session.message_scroll, 0)
+                if session.message_scroll > 0:
+                    self.assertGreater(offset, 0)
         finally:
             engine.store.close()
 

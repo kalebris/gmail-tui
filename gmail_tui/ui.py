@@ -50,6 +50,9 @@ _COMPOSE_CHOICES = ("Send", "Save as draft")
 # One row. A larger jump moves the highlight to a different line than the mail
 # the key just selected.
 SCROLL_JUMP = 1
+# Keep this many rows past the highlight while more mail exists beyond the
+# viewport, so the list does not pin to the first or last screen line.
+SCROLL_MARGIN = 5
 _SAVE_CHOICES = ("download", "open")
 
 
@@ -422,10 +425,10 @@ class MailSession:
         if not self.messages:
             return
         window = max(1, self.message_window)
-        if delta == 1 and self.message_cursor >= self.message_scroll + window - 1:
+        if delta == 1 and self._list_should_scroll_down(window):
             self._jump_page(SCROLL_JUMP)
             return
-        if delta == -1 and self.message_cursor <= self.message_scroll:
+        if delta == -1 and self._list_should_scroll_up(window):
             self._jump_page(-SCROLL_JUMP)
             return
         target = self.message_cursor + delta
@@ -439,6 +442,24 @@ class MailSession:
         else:
             self.message_cursor = max(0, target)
         self.load_reader(fetch=True)
+
+    def _list_should_scroll_down(self, window: int) -> bool:
+        """True when j should scroll instead of walking onto the last screen rows."""
+        bottom = self.message_scroll + window - 1
+        at_end = self.message_cursor >= len(self.messages) - 1 and not self._more
+        if at_end:
+            return self.message_cursor > bottom
+        margin = _scroll_margin(window)
+        return self.message_cursor >= bottom - margin
+
+    def _list_should_scroll_up(self, window: int) -> bool:
+        """True when k should scroll instead of walking onto the first screen rows."""
+        if self.message_cursor <= 0:
+            return False
+        if self.message_scroll <= 0:
+            return self.message_cursor <= self.message_scroll
+        margin = _scroll_margin(window)
+        return self.message_cursor <= self.message_scroll + margin
 
     def _jump_page(self, jump: int) -> None:
         """Move one mail and scroll by the same amount, so the highlight stays put."""
@@ -460,7 +481,13 @@ class MailSession:
                 return
             self.message_cursor -= 1
             self.message_scroll = max(0, self.message_scroll + jump)
-        self.message_scroll = _reveal(self.message_cursor, self.message_scroll, window)
+        self.message_scroll = _reveal_list(
+            self.message_cursor,
+            self.message_scroll,
+            window,
+            len(self.messages),
+            more=self._more,
+        )
         self.load_reader(fetch=True)
 
     def _move_reader(self, delta: int) -> None:
@@ -610,7 +637,13 @@ class MailSession:
             # rows away just to pin the selection on the same screen line.
             if len(self.messages) <= window:
                 preferred = 0
-            self.message_scroll = _reveal(self.message_cursor, preferred, window)
+            self.message_scroll = _reveal_list(
+                self.message_cursor,
+                preferred,
+                window,
+                len(self.messages),
+                more=self._more,
+            )
             self.load_reader(fetch=False)
 
     def _ensure_mail_depth(self, depth: int, anchor: str | None) -> None:
@@ -719,8 +752,12 @@ class MailSession:
                     break
         elif self.messages:
             self.message_cursor = min(index, len(self.messages) - 1)
-        self.message_scroll = _reveal(
-            self.message_cursor, self.message_scroll, max(1, self.message_window)
+        self.message_scroll = _reveal_list(
+            self.message_cursor,
+            self.message_scroll,
+            max(1, self.message_window),
+            len(self.messages),
+            more=self._more,
         )
         self.load_reader(fetch=False)
 
@@ -1019,7 +1056,13 @@ class MailSession:
         self.message_window = geo.message_rows
         self.reader_window = geo.reader_rows
         self.label_scroll = _reveal(self.label_cursor, self.label_scroll, geo.label_rows)
-        self.message_scroll = _reveal(self.message_cursor, self.message_scroll, geo.message_rows)
+        self.message_scroll = _reveal_list(
+            self.message_cursor,
+            self.message_scroll,
+            geo.message_rows,
+            len(self.messages),
+            more=self._more,
+        )
         if self.sixel and self.messages and self.image_slots:
             wanted = self._image_band_rows()
             if wanted != self.image_rows:
@@ -2330,8 +2373,12 @@ class MailSession:
                 if item.gmail_id == kept_id:
                     self.message_cursor = index
                     break
-        self.message_scroll = _reveal(
-            self.message_cursor, self.message_scroll, max(1, self.message_window)
+        self.message_scroll = _reveal_list(
+            self.message_cursor,
+            self.message_scroll,
+            max(1, self.message_window),
+            len(self.messages),
+            more=self._more,
         )
         self.focus = "list"
         self.load_reader(fetch=False)
@@ -2354,8 +2401,12 @@ class MailSession:
                 if _row_identity(item) == message_id:
                     self.message_cursor = index
                     break
-        self.message_scroll = _reveal(
-            self.message_cursor, self.message_scroll, max(1, self.message_window)
+        self.message_scroll = _reveal_list(
+            self.message_cursor,
+            self.message_scroll,
+            max(1, self.message_window),
+            len(self.messages),
+            more=self._more,
         )
         self.load_reader(fetch=False)
         self.reader_scroll = reader_scroll
@@ -4173,6 +4224,44 @@ def _reveal(cursor: int, scroll: int, window: int) -> int:
     if cursor >= scroll + window:
         return cursor - window + 1
     return scroll
+
+
+def _scroll_margin(window: int) -> int:
+    if window <= 1:
+        return 0
+    return min(SCROLL_MARGIN, (window - 1) // 2)
+
+
+def _reveal_list(
+    cursor: int,
+    scroll: int,
+    window: int,
+    total: int,
+    *,
+    more: bool = False,
+) -> int:
+    """Keep the selection on screen, with a margin while more mail remains."""
+    if window <= 0 or total <= 0:
+        return 0
+    limit = max(0, total - window)
+    scroll = _reveal(cursor, scroll, window)
+    margin = _scroll_margin(window)
+    if margin <= 0:
+        return max(0, min(scroll, limit))
+    below = max(0, total - 1 - cursor)
+    if more or below > 0:
+        want = margin if more else min(margin, below)
+        want = min(want, window - 1)
+        row = cursor - scroll
+        if row > window - 1 - want:
+            scroll = min(limit, cursor - (window - 1 - want))
+    above = cursor
+    if above > 0:
+        want = min(margin, above, window - 1)
+        row = cursor - scroll
+        if row < want:
+            scroll = max(0, cursor - want)
+    return max(0, min(scroll, limit))
 
 
 # Second cell of a wide character. Omitted when the row is drawn, so curses
