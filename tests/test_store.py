@@ -93,6 +93,26 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.missing_body_ids(1), ["old"])
         self.assertEqual(self.store.missing_body_ids(2), ["old", "new"])
 
+    def test_open_folder_outranks_inbox_then_the_rest(self) -> None:
+        self.store.replace_labels(
+            [
+                Label("INBOX", "INBOX", "system"),
+                Label("Label_1", "Work", "user"),
+                Label("Label_2", "Other", "user"),
+            ]
+        )
+        self.store.upsert_metadata(_message("inbox", "t1", 5_000, "inbox", ["INBOX"]), "missing")
+        self.store.upsert_metadata(_message("work", "t2", 1_000, "work", ["Label_1"]), "missing")
+        self.store.upsert_metadata(_message("other", "t3", 9_000, "other", ["Label_2"]), "missing")
+        self.store.set_open_label("Label_1")
+        self.assertEqual(self.store.next_priority_bodies("Label_1", 3), ["work", "inbox"])
+        self.assertEqual(
+            self.store.missing_body_ids(3, open_label="Label_1"),
+            ["work", "inbox", "other"],
+        )
+        self.assertEqual(self.store.missing_body_ids(1, open_label="Label_1"), ["work"])
+        self.assertEqual(self.store.next_priority_bodies("INBOX", 2), ["inbox"])
+
     def test_local_label_change_is_visible_and_queued(self) -> None:
         self.store.upsert_metadata(_message("m1", "t1", 1000, "hello", ["INBOX", "UNREAD"]), "missing")
         self.store.apply_local_labels("m1", add=["STARRED"], remove=["INBOX"])

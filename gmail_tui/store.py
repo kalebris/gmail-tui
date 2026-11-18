@@ -387,17 +387,46 @@ class Store:
         return int(rows[-1]["id"])
 
     def next_inbox_bodies(self, limit: int = 8) -> list[str]:
+        return self._missing_in_label("INBOX", limit)
+
+    def next_priority_bodies(self, open_label: str, limit: int = 8) -> list[str]:
+        """Bodies for the open folder, then inbox — before the rest of the mailbox."""
+        if limit <= 0:
+            return []
+        found: list[str] = []
+        seen: set[str] = set()
+        for label in self._priority_labels(open_label):
+            for gmail_id in self._missing_in_label(label, limit - len(found)):
+                if gmail_id in seen:
+                    continue
+                seen.add(gmail_id)
+                found.append(gmail_id)
+                if len(found) >= limit:
+                    return found
+        return found
+
+    def _priority_labels(self, open_label: str) -> list[str]:
+        labels: list[str] = []
+        chosen = (open_label or "").strip()
+        if chosen and chosen != "INBOX":
+            labels.append(chosen)
+        labels.append("INBOX")
+        return labels
+
+    def _missing_in_label(self, label: str, limit: int) -> list[str]:
+        if limit <= 0:
+            return []
         rows = self.conn.execute(
             """
             SELECT m.gmail_id
             FROM messages m
             JOIN message_labels ml ON ml.message_id = m.id
             JOIN labels l ON l.id = ml.label_id
-            WHERE l.gmail_id = 'INBOX' AND m.body_state != 'present'
+            WHERE l.gmail_id = ? AND m.body_state != 'present'
             ORDER BY m.internal_date DESC, m.id DESC
             LIMIT ?
             """,
-            (limit,),
+            (label, limit),
         ).fetchall()
         return [row[0] for row in rows]
 
@@ -1587,31 +1616,37 @@ class Store:
         ).fetchone()
         return int(row[0]), int(row[1])
 
-    def missing_body_ids(self, limit: int = 1) -> list[str]:
-        """Unsaved messages, inbox first, then newest first.
+    def missing_body_ids(self, limit: int = 1, *, open_label: str | None = None) -> list[str]:
+        """Unsaved messages: open folder, then inbox, then newest first.
 
-        Inbox membership and date are both indexed. Sorting every missing row
+        Label membership and date are both indexed. Sorting every missing row
         on each lookup walked the whole mailbox.
         """
         if limit <= 0:
             return []
-        inbox = self.conn.execute(
-            """
-            SELECT m.gmail_id
-            FROM message_labels ml
-            JOIN labels l ON l.id = ml.label_id
-            JOIN messages m ON m.id = ml.message_id
-            WHERE l.gmail_id = 'INBOX' AND m.body_state = 'missing'
-            ORDER BY ml.internal_date DESC, ml.message_id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        found = [row[0] for row in inbox]
-        if len(found) >= limit:
-            return found
+        found: list[str] = []
+        skip: set[str] = set()
+        for label in self._priority_labels(open_label or self.open_label()):
+            rows = self.conn.execute(
+                """
+                SELECT m.gmail_id
+                FROM message_labels ml
+                JOIN labels l ON l.id = ml.label_id
+                JOIN messages m ON m.id = ml.message_id
+                WHERE l.gmail_id = ? AND m.body_state = 'missing'
+                ORDER BY ml.internal_date DESC, ml.message_id DESC
+                LIMIT ?
+                """,
+                (label, limit - len(found)),
+            ).fetchall()
+            for row in rows:
+                if row[0] in skip:
+                    continue
+                skip.add(row[0])
+                found.append(row[0])
+                if len(found) >= limit:
+                    return found
         need = limit - len(found)
-        skip = set(found)
         rest = self.conn.execute(
             """
             SELECT gmail_id FROM messages

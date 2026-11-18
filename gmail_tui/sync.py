@@ -93,6 +93,9 @@ class Engine:
     # Background caching of message bodies. Opening a message, search, and
     # folder changes still fetch when this is off.
     background_bodies: bool = True
+    # The open reader is waiting on a body. Skip quota pacing so UrgentWork
+    # can run on the next account-thread turn instead of sleeping ~0.6s.
+    open_waiting: bool = False
 
     @classmethod
     def open(
@@ -196,7 +199,7 @@ class Engine:
         count = 0
         seen: set[str] = set()
         while self.store.is_idle():
-            missing = self.store.missing_body_ids(limit=1)
+            missing = self.store.missing_body_ids(limit=1, open_label=self.store.open_label())
             if not missing or missing[0] in seen:
                 break
             seen.add(missing[0])
@@ -694,6 +697,10 @@ class UrgentWork:
         elif getattr(session, "_fetch_gmail_id", None) == gmail_id:
             session.needs_fetch = False
             session._fetch_gmail_id = None
+            if hasattr(session, "_set_open_waiting"):
+                session._set_open_waiting()
+            else:
+                self.engine.open_waiting = False
 
 
 class BackgroundSync:
@@ -910,7 +917,9 @@ class BackgroundSync:
             "error",
         }:
             return False
-        if self._inbox_catchup or self.engine.store.next_inbox_bodies(1):
+        if self._inbox_catchup or self.engine.store.next_priority_bodies(
+            self.engine.store.open_label(), 1
+        ):
             return False
         if not self._history_start():
             return False
@@ -991,6 +1000,12 @@ class BackgroundSync:
         self.report.bodies_downloaded += 1
         # The open reader notices the file on its own. Dirty would rebuild
         # the mailbox between keypresses.
+
+    def _pace_body(self) -> None:
+        """Space out background raw fetches unless the open reader is waiting."""
+        if self.engine.open_waiting:
+            return
+        self.engine.quota.spread(UNITS_GET_RAW)
 
     def _stop(self, exc: Exception) -> None:
         self.exc = exc
@@ -1184,25 +1199,27 @@ class BackgroundSync:
         self._inbox_scan: int | None = None
 
     def _serve_inbox(self) -> bool:
-        """List the inbox, then download any inbox message that is not saved yet."""
+        """Catch up the inbox list, then download the open folder and inbox first."""
         if self._inbox_catchup and self.engine.store.bootstrap_phase() != "need_profile":
             self._inbox_catchup_step()
             return True
         if not self.engine.background_bodies:
             return False
-        ids = self.engine.store.next_inbox_bodies(
-            self.engine.quota.available(UNITS_GET_RAW, _INBOX_BODY_CHUNK)
+        open_label = self.engine.store.open_label()
+        ids = self.engine.store.next_priority_bodies(
+            open_label,
+            self.engine.quota.available(UNITS_GET_RAW, _INBOX_BODY_CHUNK),
         )
         if ids:
-            self._download_inbox(ids)
+            self._download_priority(ids, open_label)
             return True
         return False
 
-    def _download_inbox(self, ids: list[str]) -> None:
-        done, total = self.engine.store.inbox_body_counts()
+    def _download_priority(self, ids: list[str], open_label: str) -> None:
+        done, total = self._priority_body_counts(open_label)
         self.done = done
         self.total = max(total, 1)
-        self.phase = f"downloading inbox {done}/{self.total}"
+        self.phase = f"downloading mail {done}/{self.total}"
         saved = 0
         if len(ids) == 1:
             before = self.engine.store.body_readable(ids[0])
@@ -1218,16 +1235,37 @@ class BackgroundSync:
             for gmail_id in missing:
                 _unlink(self.engine.store.delete_message(gmail_id))
             saved = len(messages)
-        done, total = self.engine.store.inbox_body_counts()
+        done, total = self._priority_body_counts(open_label)
         self.done = done
         self.total = max(total, 1)
-        self.phase = f"downloading inbox {done}/{self.total}"
+        self.phase = f"downloading mail {done}/{self.total}"
         self.report.bodies_downloaded += saved
         # Rows are already listed. Marking the list dirty here rebuilt the
         # mailbox on the UI thread between each j/k while the bodies saved.
         # Same pacing as backfill: leave room for other accounts on this machine.
         for _ in ids:
-            self.engine.quota.spread(UNITS_GET_RAW)
+            self._pace_body()
+
+    def _priority_body_counts(self, open_label: str) -> tuple[int, int]:
+        """Saved vs total for the open folder and inbox (the priority set)."""
+        if not open_label or open_label == "INBOX":
+            return self.engine.store.inbox_body_counts()
+        # Count distinct messages that carry either label.
+        row = self.engine.store.conn.execute(
+            """
+            SELECT
+              COALESCE(SUM(CASE WHEN m.body_state = 'present' THEN 1 ELSE 0 END), 0),
+              COUNT(*)
+            FROM messages m
+            WHERE EXISTS (
+              SELECT 1 FROM message_labels ml
+              JOIN labels l ON l.id = ml.label_id
+              WHERE ml.message_id = m.id AND l.gmail_id IN (?, 'INBOX')
+            )
+            """,
+            (open_label,),
+        ).fetchone()
+        return int(row[0]), int(row[1])
 
     def _inbox_catchup_step(self) -> None:
         store = self.engine.store
@@ -1494,7 +1532,7 @@ class BackgroundSync:
         self.engine._download_body(gmail_id)
         self.report.bodies_downloaded += 1
         # Same as a priority fetch: the reader updates, the list does not.
-        self.engine.quota.spread(UNITS_GET_RAW)
+        self._pace_body()
 
     def _begin_push(self) -> None:
         self._groups = list(self.engine.store.queue_groups().items())
@@ -1549,7 +1587,9 @@ class BackgroundSync:
         if not self.engine.store.is_idle():
             self._finish_idle()
             return
-        missing = self.engine.store.missing_body_ids(limit=1)
+        missing = self.engine.store.missing_body_ids(
+            limit=1, open_label=self.engine.store.open_label()
+        )
         if not missing or missing[0] in self._seen:
             self._finish_idle()
             return
@@ -1563,7 +1603,7 @@ class BackgroundSync:
         # One raw fetch is 60 of the 6,000 units, so it owns 0.6s of the minute.
         # Sleeping the rest keeps a reused connection from running the parser
         # and the index back to back until the budget is gone.
-        self.engine.quota.spread(UNITS_GET_RAW)
+        self._pace_body()
 
     def _publish_cache(self) -> None:
         if not self.engine.background_bodies:
@@ -1581,7 +1621,9 @@ class BackgroundSync:
 
     def _uncached_bodies(self) -> bool:
         store = self.engine.store
-        return store.missing_body_count() > 0 or bool(store.next_inbox_bodies(1))
+        return store.missing_body_count() > 0 or bool(
+            store.next_priority_bodies(store.open_label(), 1)
+        )
 
     def _finish_idle(self) -> None:
         if self.engine.wake_due_snoozes():

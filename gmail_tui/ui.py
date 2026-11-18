@@ -905,21 +905,14 @@ class MailSession:
         self.label_cursor = _clamp(self.label_cursor, len(self.visible))
         return self.visible[self.label_cursor]
 
-    def _browsing_inbox(self) -> bool:
-        if self.search_text:
-            return False
-        current = self.current_label()
-        return current is not None and current.gmail_id == "INBOX"
-
     def _wants_body(self, preview) -> bool:
         """The open message should be fetched now.
 
-        Inbox bodies normally arrive with the background cache. With that
-        cache paused, the message on screen is fetched on its own.
+        Background caching still fills the rest of the mailbox. The message
+        on screen jumps the queue through UrgentWork so j/k through new mail
+        does not wait on the paced download backlog.
         """
         if preview is None or preview.body_cached:
-            return False
-        if self._browsing_inbox() and self.engine.background_bodies:
             return False
         return True
 
@@ -970,6 +963,8 @@ class MailSession:
             self._set_reader(["(no message)"])
             self._shown_body = ""
             self.needs_fetch = False
+            self._fetch_gmail_id = None
+            self._set_open_waiting()
             return
         self.message_cursor = _clamp(self.message_cursor, len(self.messages))
         message = self.messages[self.message_cursor]
@@ -981,11 +976,13 @@ class MailSession:
         elif message.gmail_id != self._fetch_gmail_id or not missing:
             self.needs_fetch = False
         self._fetch_gmail_id = message.gmail_id if self.needs_fetch else None
+        self._set_open_waiting()
 
     def note_body(self) -> None:
         if not self.messages:
             self.needs_fetch = False
             self._fetch_gmail_id = None
+            self._set_open_waiting()
             return
         message = self.messages[self.message_cursor]
         preview = self.engine.store.preview_message(message.gmail_id)
@@ -996,9 +993,11 @@ class MailSession:
         if preview is None or preview.body_cached:
             self.needs_fetch = False
             self._fetch_gmail_id = None
+        self._set_open_waiting()
 
     def fetch_open(self) -> None:
         self.needs_fetch = False
+        self._set_open_waiting()
         if not self.messages:
             return
         message = self.messages[self.message_cursor]
@@ -1011,6 +1010,9 @@ class MailSession:
         preview = self.engine.store.preview_message(message.gmail_id)
         self._show_reader(preview, message.gmail_id)
         self._refresh_attachment_flag(message.gmail_id)
+
+    def _set_open_waiting(self) -> None:
+        self.engine.open_waiting = bool(self.needs_fetch)
 
     def reveal(self, geo: Geometry) -> None:
         self.label_window = geo.label_rows

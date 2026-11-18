@@ -286,8 +286,8 @@ in `~/.config/gmail-tui/keys` (or via Nix `programs.gmail-tui.keys`).
 | snooze | `b` |
 | down | `j` `↓` |
 | up | `k` `↑` |
-| page-down | `space` `PgDn` |
-| page-up | `PgUp` |
+| page-down | `J` `space` `PgDn` |
+| page-up | `K` `PgUp` |
 | top | `g` `Home` |
 | bottom | `G` `End` |
 | inbox | `g-i` |

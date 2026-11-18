@@ -751,6 +751,21 @@ class SyncTests(unittest.TestCase):
         self.assertNotIn("INBOX", self.engine.store.message_label_ids("in1"))
         self.assertNotIn("INBOX", self.fake.messages["in1"].label_ids)
 
+    def test_body_pacing_yields_while_the_open_reader_is_waiting(self) -> None:
+        self.engine.startup()
+        sleeps: list[float] = []
+        self.engine.quota._sleeper = sleeps.append
+        # Force a pending pace debt so spread would normally sleep.
+        self.engine.quota._next_share = time.monotonic() + 0.5
+        job = BackgroundSync(self.engine)
+        self.engine.open_waiting = True
+        job._pace_body()
+        self.assertEqual(sleeps, [])
+        self.engine.open_waiting = False
+        self.engine.quota._next_share = time.monotonic() + 0.5
+        job._pace_body()
+        self.assertTrue(sleeps)
+
     def test_urgent_work_sends_changes_before_more_mail_is_fetched(self) -> None:
         self.engine.startup()
         self.engine.store.mark_body_missing("ar1")
@@ -759,11 +774,19 @@ class SyncTests(unittest.TestCase):
         self.fake.calls.clear()
         session = MailSession(self.engine)
         self.assertEqual(session.current_label().gmail_id, "INBOX")
-        self.assertFalse(session.needs_fetch)
+        # Inbox bodies used to wait on the paced background queue. The open
+        # message now jumps the line through UrgentWork.
+        self.engine.store.mark_body_missing("in1")
         session.load_reader(fetch=True)
-        session.refresh_view()
+        self.assertTrue(session.needs_fetch)
+        self.assertTrue(self.engine.open_waiting)
+        self.fake.calls.clear()
+        urgent = UrgentWork(self.engine)
+        self.assertTrue(urgent.step(session))
+        self.assertTrue(self.engine.store.body_readable("in1"))
+        self.assertTrue(any("in1:raw" in call for call in self.fake.calls))
         self.assertFalse(session.needs_fetch)
-        self.assertFalse(any(call.endswith(":raw") for call in self.fake.calls))
+        self.assertFalse(self.engine.open_waiting)
         for index, item in enumerate(session.visible):
             if item.gmail_id == "Label_1":
                 session.label_cursor = index
@@ -771,10 +794,8 @@ class SyncTests(unittest.TestCase):
         session.load_messages(fetch=True)
         self.assertTrue(session.needs_fetch)
         self.fake.calls.clear()
-        urgent = UrgentWork(self.engine)
         self.assertTrue(urgent.step(session))
         self.assertTrue(self.engine.store.body_readable("ar1"))
-        self.assertFalse(self.engine.store.body_readable("in1"))
         self.assertFalse(any(call.startswith("messages.modify") for call in self.fake.calls))
         self.assertTrue(any("ar1:raw" in call for call in self.fake.calls))
         self.fake.calls.clear()
