@@ -176,6 +176,10 @@ class ChangeSpeedTests(unittest.TestCase):
             self.assertEqual(session.messages[session.message_cursor].gmail_id, "m3")
             self.assertIn("oldest body", "\n".join(session.reader_view))
             self.assertNotIn("newest body", "\n".join(session.reader_view))
+            # Store write is deferred so the key stays as light as select.
+            self.assertTrue(session.label_todo)
+            self.assertFalse(engine.store.has_pending_mutations())
+            session.flush_label_todo()
             self.assertTrue(engine.store.has_pending_mutations())
         finally:
             engine.store.close()

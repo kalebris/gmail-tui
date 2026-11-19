@@ -2597,11 +2597,14 @@ class MailboxTests(unittest.TestCase):
             session.archive_selected()
             self.assertEqual([item.subject for item in session.messages], ["Second"])
             self.assertIn("second body", "\n".join(session.reader))
+            self.assertTrue(session.label_todo)
+            session.flush_label_todo()
             archived = {(item.op, item.label) for item in engine.store.pending_changes()}
             self.assertIn(("remove", "INBOX"), archived)
             self.assertNotIn(("add", "TRASH"), archived)
             session.delete_selected()
             self.assertEqual(session.messages, [])
+            session.flush_label_todo()
             deleted = {(item.op, item.label) for item in engine.store.pending_changes()}
             self.assertIn(("add", "TRASH"), deleted)
             self.assertIn(("remove", "INBOX"), deleted)
@@ -2638,6 +2641,7 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual([item.subject for item in session.messages], ["First", "Second"])
             self.assertEqual(engine.store.pending_changes(), [])
             session.archive_selected()
+            session.flush_label_todo()
             groups = engine.store.queue_groups()
             gmail_id = next(iter(groups))
             engine.store.complete_push(gmail_id, groups[gmail_id], ["UNREAD"], "9")
@@ -2670,6 +2674,7 @@ class MailboxTests(unittest.TestCase):
             session.archive_selected()
             self.assertEqual([item.subject for item in session.messages], ["Second"])
             self.assertEqual(session.selected, set())
+            session.flush_label_todo()
             queued = {(item.gmail_id, item.op, item.label) for item in engine.store.pending_changes()}
             self.assertIn(("m1", "remove", "INBOX"), queued)
             self.assertNotIn(("m2", "remove", "INBOX"), queued)
@@ -2737,6 +2742,7 @@ class MailboxTests(unittest.TestCase):
             session.toggle_selected()
             session.delete_selected()
             self.assertEqual(session.messages, [])
+            session.flush_label_todo()
             trashed = {
                 item.gmail_id
                 for item in engine.store.pending_changes()

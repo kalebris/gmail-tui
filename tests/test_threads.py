@@ -177,6 +177,7 @@ class ThreadListTests(unittest.TestCase):
             self.assertEqual([item.gmail_id for item in session.messages], ["reply", "alone"])
             session.archive_selected()
             self.assertEqual([item.gmail_id for item in session.messages], ["alone"])
+            session.flush_label_todo()
             self.assertEqual(
                 [item.gmail_id for item in engine.store.list_messages("Label_1")],
                 ["reply"],

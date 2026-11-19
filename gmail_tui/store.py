@@ -1248,19 +1248,32 @@ class Store:
         remove: list[str] | None = None,
     ) -> None:
         """Update the replica immediately and queue the intent for Gmail."""
+        self.apply_local_labels_batch([(gmail_id, add, remove)])
+
+    def apply_local_labels_batch(
+        self,
+        changes: list[tuple[str, list[str] | None, list[str] | None]],
+    ) -> None:
+        """Apply many local label intents in one transaction."""
+        if not changes:
+            return
+        threads: set[int] = set()
         with self._tx():
-            row = self._message_row(gmail_id)
-            if row is None:
-                raise MessageNotFound(gmail_id)
-            for label in add or []:
-                self._ensure_label(label)
-                self._set_membership(row["id"], label, row["internal_date"], present=True)
-                self._queue_op(row["id"], label, "add")
-            for label in remove or []:
-                self._ensure_label(label)
-                self._set_membership(row["id"], label, row["internal_date"], present=False)
-                self._queue_op(row["id"], label, "remove")
-            self._rebuild_thread(row["thread_id"])
+            for gmail_id, add, remove in changes:
+                row = self._message_row(gmail_id)
+                if row is None:
+                    raise MessageNotFound(gmail_id)
+                for label in add or []:
+                    self._ensure_label(label)
+                    self._set_membership(row["id"], label, row["internal_date"], present=True)
+                    self._queue_op(row["id"], label, "add")
+                for label in remove or []:
+                    self._ensure_label(label)
+                    self._set_membership(row["id"], label, row["internal_date"], present=False)
+                    self._queue_op(row["id"], label, "remove")
+                threads.add(row["thread_id"])
+            for thread_id in threads:
+                self._rebuild_thread(thread_id)
 
     def undo_labels(self, gmail_id: str, add: list[str], remove: list[str]) -> None:
         """Reverse one label change. An unsent intent is dropped instead of inverted on Gmail."""

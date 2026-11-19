@@ -197,6 +197,10 @@ class MailSession:
         self._fetch_gmail_id: str | None = None
         self.urgent_phase = ""
         self.labels_stale = False
+        # Archive/delete: update the list now; store + Gmail push run on the
+        # account thread so d feels as light as x.
+        self.label_todo: list[tuple[list[str], list[str], list[str]]] = []
+        self._hidden: set[str] = set()
         self.inbox_count = 0
         self.inbox_unread = 0
         self._more = False
@@ -700,17 +704,56 @@ class MailSession:
             return
         index = _clamp(self.message_cursor, len(self.messages))
         anchor = targets[0]
+        add_labels = list(add or ())
+        remove_labels = list(remove or ())
         for gmail_id in targets:
-            self.engine.store.apply_local_labels(gmail_id, add=add, remove=remove)
             self.selected.discard(gmail_id)
         self._push_undo(
-            [(gmail_id, tuple(add or ()), tuple(remove or ())) for gmail_id in targets]
+            [(gmail_id, tuple(add_labels), tuple(remove_labels)) for gmail_id in targets]
         )
         self.labels_stale = True
-        if self.search_text or not self._leaves_current_view(add, remove):
+        if self.search_text or not self._leaves_current_view(add_labels, remove_labels):
+            self.engine.store.apply_local_labels_batch(
+                [(gmail_id, add_labels, remove_labels) for gmail_id in targets]
+            )
             self._reload_open_list(anchor, index)
             return
+        # Leave the folder immediately; persist + push in the background.
+        self._hidden.update(targets)
+        self.label_todo.append((list(targets), add_labels, remove_labels))
         self._drop_acted(set(targets), index)
+
+    def flush_label_todo(self) -> bool:
+        """Apply deferred archive/delete intents. True when anything was written."""
+        todo = self.label_todo
+        if not todo:
+            return False
+        self.label_todo = []
+        changes: list[tuple[str, list[str], list[str]]] = []
+        done: set[str] = set()
+        for targets, add_labels, remove_labels in todo:
+            for gmail_id in targets:
+                changes.append((gmail_id, add_labels, remove_labels))
+                done.add(gmail_id)
+        self.engine.store.apply_local_labels_batch(changes)
+        self._hidden -= done
+        return True
+
+    def _strip_hidden(self) -> None:
+        if not self._hidden:
+            return
+        self.messages = [item for item in self.messages if not self._row_hidden(item)]
+        self._mail_threads = [item for item in self._mail_threads if not self._row_hidden(item)]
+        if self.messages:
+            self.message_cursor = min(self.message_cursor, len(self.messages) - 1)
+        else:
+            self.message_cursor = 0
+
+    def _row_hidden(self, item: MessageSummary) -> bool:
+        if item.gmail_id in self._hidden:
+            return True
+        members = item.member_ids or ()
+        return bool(members) and all(gmail_id in self._hidden for gmail_id in members)
 
     def _leaves_current_view(self, add: list[str] | None, remove: list[str] | None) -> bool:
         current = self.current_label()
@@ -828,6 +871,8 @@ class MailSession:
         if not self._undo:
             self.notice = "nothing to undo"
             return
+        # Deferred deletes must hit the store before undo can reverse them.
+        self.flush_label_todo()
         steps = self._undo.pop()
         for gmail_id, added, removed in steps:
             self.engine.store.undo_labels(gmail_id, list(added), list(removed))
@@ -971,6 +1016,7 @@ class MailSession:
             )
             self._more = len(self._mail_threads) == PAGE
             self._show_threads()
+            self._strip_hidden()
         if scope != self._selection_scope:
             self.selected.clear()
             self._selection_scope = scope
@@ -2511,9 +2557,13 @@ class MailSession:
         rows: list[MessageSummary] = []
         for head in self._mail_threads:
             shown = self._thread_head(head)
+            if self._row_hidden(shown):
+                continue
             rows.append(shown)
             if shown.expanded:
-                rows.extend(self._thread_children(shown))
+                rows.extend(
+                    child for child in self._thread_children(shown) if not self._row_hidden(child)
+                )
         self.messages = rows
 
     def _thread_head(self, head: MessageSummary) -> MessageSummary:

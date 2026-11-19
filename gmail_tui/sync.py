@@ -632,6 +632,8 @@ class UrgentWork:
         self._ready: list[tuple] = []
 
     def has_work(self, session) -> bool:
+        if getattr(session, "label_todo", None):
+            return True
         if self.paused:
             return False
         with self._mu:
@@ -642,7 +644,16 @@ class UrgentWork:
     def take(self, session) -> bool:
         """Snapshot the next call. This does not talk to Gmail."""
         with self._mu:
-            if self.paused or self._inflight is not None or self._running:
+            if self._inflight is not None or self._running:
+                return False
+            todo = getattr(session, "label_todo", None)
+            if todo:
+                # Persist deferred archive/delete before any open/push.
+                session.label_todo = []
+                self._inflight = ("local", todo)
+                self.phase = ""
+                return True
+            if self.paused:
                 return False
             if session.needs_fetch:
                 if not session.messages:
@@ -671,11 +682,24 @@ class UrgentWork:
             self._running = True
         ready: tuple = ("error", "interrupted", job)
         try:
-            if job[0] == "open":
+            if job[0] == "local":
+                changes: list[tuple[str, list[str], list[str]]] = []
+                done: set[str] = set()
+                for targets, add_labels, remove_labels in job[1]:
+                    for gmail_id in targets:
+                        changes.append((gmail_id, add_labels, remove_labels))
+                        done.add(gmail_id)
+                try:
+                    self.engine.store.apply_local_labels_batch(changes)
+                except Exception as exc:  # noqa: BLE001 - surface on the status line
+                    ready = ("error", str(exc), job)
+                else:
+                    ready = ("local", done)
+            elif job[0] == "open":
                 try:
                     self.engine.open_message(job[1])
                 except Offline as exc:
-                    ready: tuple = ("offline", str(exc), job)
+                    ready = ("offline", str(exc), job)
                 except GmailError as exc:
                     ready = ("error", str(exc), job)
                 else:
@@ -710,6 +734,11 @@ class UrgentWork:
         saw_fault = False
         for item in ready:
             kind = item[0]
+            if kind == "local":
+                hidden = getattr(session, "_hidden", None)
+                if isinstance(hidden, set):
+                    hidden -= item[1]
+                continue
             if kind in {"error", "offline"}:
                 # Offline after sleep is transient; keep the next open/push armed.
                 saw_fault = True
@@ -725,6 +754,7 @@ class UrgentWork:
             not saw_fault
             and not self.paused
             and not session.needs_fetch
+            and not getattr(session, "label_todo", None)
             and not self.engine.store.has_pending_mutations()
         ):
             self.phase = ""
