@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 
 from gmail_tui.settings import (
+    DEFAULT_ON_DEMAND,
     SettingsError,
+    apply,
     config_dir,
     config_path,
     default_data,
@@ -21,6 +23,7 @@ from gmail_tui.settings import (
     xdg_config_home,
     xdg_data_home,
 )
+from gmail_tui import store
 
 
 class SettingsTests(unittest.TestCase):
@@ -72,6 +75,31 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("datetime", text)
         self.assertIn("weekday", text)
         self.assertIn("oauth-tpm", text)
+        self.assertIn("on-demand", text)
+
+    def test_on_demand_folders_default_and_override(self) -> None:
+        self.assertEqual(parse("").on_demand, DEFAULT_ON_DEMAND)
+        self.assertEqual(
+            parse("on-demand trash\non-demand Label_9\n").on_demand,
+            ("TRASH", "Label_9"),
+        )
+        self.assertEqual(parse("on-demand none\n").on_demand, ())
+        self.assertEqual(
+            parse("on-demand none\non-demand SPAM\n").on_demand,
+            ("SPAM",),
+        )
+        with self.assertRaises(SettingsError):
+            parse("on-demand TRASH SPAM\n")
+        with self.assertRaises(SettingsError):
+            parse("on-demand weird/label\n")
+        apply(parse("on-demand SPAM\n"))
+        try:
+            self.assertEqual(store.on_demand_labels(), frozenset({"SPAM"}))
+            self.assertTrue(store.defers_body(["SPAM"], "INBOX"))
+            self.assertFalse(store.defers_body(["TRASH"], "INBOX"))
+        finally:
+            apply(parse(""))
+            self.assertEqual(store.on_demand_labels(), frozenset(DEFAULT_ON_DEMAND))
 
     def test_profile_nests_under_the_data_directory(self) -> None:
         base = Path("/var/gmail-tui")

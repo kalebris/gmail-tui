@@ -30,6 +30,26 @@ _WAL_CHECKPOINT_BYTES = 4 * 1024 * 1024
 _WRITE_BATCH = 25
 # Parsed bodies kept so stepping through a burst does not reread each file.
 _PARSE_CACHE_LIMIT = 64
+# Folders whose bodies wait until that folder is open (or a message is).
+# Overridden from config via ``configure_on_demand``.
+_ON_DEMAND_LABELS: frozenset[str] = frozenset({"TRASH", "SPAM"})
+
+
+def configure_on_demand(labels: tuple[str, ...] | list[str]) -> None:
+    """Set which label ids defer background body downloads."""
+    global _ON_DEMAND_LABELS
+    _ON_DEMAND_LABELS = frozenset(str(label).strip() for label in labels if str(label).strip())
+
+
+def on_demand_labels() -> frozenset[str]:
+    return _ON_DEMAND_LABELS
+
+
+def defers_body(
+    labels: list[str] | set[str] | tuple[str, ...], open_label: str | None
+) -> bool:
+    """True when this message's body should wait for its on-demand folder."""
+    return _defers_body(labels, open_label)
 
 
 class MessageNotFound(Exception):
@@ -396,7 +416,9 @@ class Store:
         found: list[str] = []
         seen: set[str] = set()
         for label in self._priority_labels(open_label):
-            for gmail_id in self._missing_in_label(label, limit - len(found)):
+            for gmail_id in self._missing_in_label(
+                label, limit - len(found), open_label=open_label
+            ):
                 if gmail_id in seen:
                     continue
                 seen.add(gmail_id)
@@ -413,16 +435,22 @@ class Store:
         labels.append("INBOX")
         return labels
 
-    def _missing_in_label(self, label: str, limit: int) -> list[str]:
+    def _missing_in_label(
+        self, label: str, limit: int, *, open_label: str | None = None
+    ) -> list[str]:
         if limit <= 0:
             return []
+        defer = _body_defer_sql(
+            "m", open_label if open_label is not None else self.open_label()
+        )
         rows = self.conn.execute(
-            """
+            f"""
             SELECT m.gmail_id
             FROM messages m
             JOIN message_labels ml ON ml.message_id = m.id
             JOIN labels l ON l.id = ml.label_id
             WHERE l.gmail_id = ? AND m.body_state != 'present'
+              {defer}
             ORDER BY m.internal_date DESC, m.id DESC
             LIMIT ?
             """,
@@ -1582,11 +1610,13 @@ class Store:
             path.unlink()
 
     def pending_body_ids(self, open_label: str) -> list[str]:
+        defer = _body_defer_sql("m", open_label)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT m.gmail_id
             FROM messages m
             WHERE m.body_state = 'pending_now'
+              {defer}
             ORDER BY EXISTS (
                 SELECT 1
                 FROM message_labels ml
@@ -1599,19 +1629,27 @@ class Store:
         return [row[0] for row in rows]
 
     def missing_body_count(self) -> int:
+        defer = _body_defer_sql("m", self.open_label())
         row = self.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE body_state = 'missing'"
+            f"""
+            SELECT COUNT(*) FROM messages m
+            WHERE m.body_state = 'missing'
+              {defer}
+            """
         ).fetchone()
         return int(row[0])
 
     def body_cache_counts(self) -> tuple[int, int]:
         """Bodies already saved, and every message that caching walks."""
+        defer = _body_defer_sql("m", self.open_label())
         row = self.conn.execute(
-            """
+            f"""
             SELECT
-              COALESCE(SUM(CASE WHEN body_state = 'present' THEN 1 ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN m.body_state = 'present' THEN 1 ELSE 0 END), 0),
               COUNT(*)
-            FROM messages
+            FROM messages m
+            WHERE 1=1
+              {defer}
             """
         ).fetchone()
         return int(row[0]), int(row[1])
@@ -1620,20 +1658,24 @@ class Store:
         """Unsaved messages: open folder, then inbox, then newest first.
 
         Label membership and date are both indexed. Sorting every missing row
-        on each lookup walked the whole mailbox.
+        on each lookup walked the whole mailbox. On-demand folders wait until
+        that folder is open.
         """
         if limit <= 0:
             return []
+        chosen = open_label if open_label is not None else self.open_label()
         found: list[str] = []
         skip: set[str] = set()
-        for label in self._priority_labels(open_label or self.open_label()):
+        for label in self._priority_labels(chosen):
+            defer = _body_defer_sql("m", chosen)
             rows = self.conn.execute(
-                """
+                f"""
                 SELECT m.gmail_id
                 FROM message_labels ml
                 JOIN labels l ON l.id = ml.label_id
                 JOIN messages m ON m.id = ml.message_id
                 WHERE l.gmail_id = ? AND m.body_state = 'missing'
+                  {defer}
                 ORDER BY ml.internal_date DESC, ml.message_id DESC
                 LIMIT ?
                 """,
@@ -1647,11 +1689,13 @@ class Store:
                 if len(found) >= limit:
                     return found
         need = limit - len(found)
+        defer = _body_defer_sql("m", chosen)
         rest = self.conn.execute(
-            """
-            SELECT gmail_id FROM messages
-            WHERE body_state = 'missing'
-            ORDER BY internal_date DESC, id DESC
+            f"""
+            SELECT m.gmail_id FROM messages m
+            WHERE m.body_state = 'missing'
+              {defer}
+            ORDER BY m.internal_date DESC, m.id DESC
             LIMIT ?
             """,
             (need + len(skip),),
@@ -1674,8 +1718,14 @@ class Store:
         state = self._state()
         if state["bootstrap_phase"] != "done":
             return False
+        defer = _body_defer_sql("m", self.open_label())
         pending = self.conn.execute(
-            "SELECT 1 FROM messages WHERE body_state='pending_now' LIMIT 1"
+            f"""
+            SELECT 1 FROM messages m
+            WHERE m.body_state='pending_now'
+              {defer}
+            LIMIT 1
+            """
         ).fetchone()
         if pending is not None:
             return False
@@ -1921,6 +1971,7 @@ class Store:
         labels = list(message.label_ids)
         if not labels and header is not None:
             labels = list(header.label_ids)
+        schedule = _body_schedule(labels, self.open_label())
         if existing is None:
             snapshot = header or IncomingMessage(
                 gmail_id=message.id,
@@ -1928,10 +1979,11 @@ class Store:
                 label_ids=labels,
             )
             snapshot.label_ids = labels
-            return self._upsert_snapshot(snapshot, "pending_now")
+            return self._upsert_snapshot(snapshot, schedule)
         self._fill_headers(existing["id"], header, metadata_complete=header is not None)
         self._apply_delta(existing["id"], existing["internal_date"], labels, [])
-        self._mark_pending_now(existing["id"])
+        if schedule == "pending_now":
+            self._mark_pending_now(existing["id"])
         self.conn.execute(
             "UPDATE messages SET resync_gen=? WHERE id=?",
             (self._state()["resync_gen"], existing["id"]),
@@ -1951,12 +2003,16 @@ class Store:
             )
             if added:
                 created.label_ids = label_ids
-            schedule = "pending_now" if added and "INBOX" in label_ids else "missing"
+            labels = list(created.label_ids)
+            if added and "INBOX" in label_ids:
+                schedule = _body_schedule(labels, self.open_label())
+            else:
+                schedule = "missing"
             thread_id = self._upsert_snapshot(created, schedule)
             return thread_id
         if added:
             self._apply_delta(row["id"], row["internal_date"], label_ids, [])
-            if "INBOX" in label_ids:
+            if "INBOX" in label_ids and not _defers_body(label_ids, self.open_label()):
                 self._mark_pending_now(row["id"])
         else:
             self._apply_delta(row["id"], row["internal_date"], [], label_ids)
@@ -2578,6 +2634,34 @@ def _history_reached(cursor: str, confirmed: str) -> bool:
         return int(cursor) >= int(confirmed)
     except ValueError:
         return cursor == confirmed
+
+
+def _defers_body(labels: list[str] | set[str] | tuple[str, ...], open_label: str | None) -> bool:
+    """True when on-demand folder bodies should wait for that folder (or an open)."""
+    deferred = _ON_DEMAND_LABELS.intersection(labels)
+    if not deferred:
+        return False
+    return (open_label or "") not in deferred
+
+
+def _body_schedule(labels: list[str], open_label: str | None) -> str:
+    return "missing" if _defers_body(labels, open_label) else "pending_now"
+
+
+def _body_defer_sql(alias: str, open_label: str | None) -> str:
+    """SQL that skips on-demand folders unless that folder is open."""
+    allowed = (open_label or "").upper()
+    blocked = sorted(label for label in _ON_DEMAND_LABELS if label != allowed)
+    if not blocked:
+        return ""
+    labels = ", ".join("'" + label.replace("'", "''") + "'" for label in blocked)
+    return f"""
+    AND NOT EXISTS (
+      SELECT 1 FROM message_labels ml
+      JOIN labels l ON l.id = ml.label_id
+      WHERE ml.message_id = {alias}.id AND l.gmail_id IN ({labels})
+    )
+    """
 
 
 def _check_gmail_id(gmail_id: str) -> None:

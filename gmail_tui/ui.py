@@ -759,7 +759,8 @@ class MailSession:
             len(self.messages),
             more=self._more,
         )
-        self.load_reader(fetch=False)
+        # Same as j/select: ask UrgentWork for the next body immediately.
+        self.load_reader(fetch=True)
 
     def toggle_unread(self) -> None:
         """Flip UNREAD on the selection, or the cursor message. Marking the cursor read moves on."""
@@ -865,7 +866,7 @@ class MailSession:
             else:
                 self.message_cursor = min(index, max(0, len(self.messages) - 1))
         if self.messages:
-            self.load_reader(fetch=False)
+            self.load_reader(fetch=True)
 
     def next_unread(self) -> None:
         """Move to the next unread message, loading further pages and then wrapping."""

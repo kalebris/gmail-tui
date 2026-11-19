@@ -41,7 +41,14 @@ from gmail_tui.http_gmail import HttpStatus, is_precondition_failed
 from gmail_tui.oauth import OAuthError
 from gmail_tui.quota import Quota, SyncStopped
 from gmail_tui.search import ParsedQuery, parse_query
-from gmail_tui.store import QueueItem, SearchHit, Store, ThreadCursor, ThreadSummary
+from gmail_tui.store import (
+    QueueItem,
+    SearchHit,
+    Store,
+    ThreadCursor,
+    ThreadSummary,
+    defers_body,
+)
 from gmail_tui.textutil import parse_rfc822
 
 _POLL_SECONDS = 60.0
@@ -1791,6 +1798,9 @@ def _unauthorized(exc: BaseException) -> bool:
 
 
 def _wants_body_now(message: IncomingMessage, listed_label: str | None, open_label: str) -> bool:
+    # On-demand folders (config ``on-demand``): metadata only until open/viewed.
+    if defers_body(message.label_ids, open_label):
+        return False
     if "INBOX" in message.label_ids:
         return True
     return _in_view(message, listed_label, open_label)

@@ -2610,6 +2610,20 @@ class MailboxTests(unittest.TestCase):
         finally:
             engine.store.close()
 
+    def test_delete_fetches_the_next_body_like_down(self) -> None:
+        """Delete used to open the next row with fetch=False, so the body waited."""
+        self.store.mark_body_missing("m2")
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            session.focus = "list"
+            self.assertEqual(session.messages[0].gmail_id, "m1")
+            session.delete_selected()
+            self.assertEqual(session.messages[0].gmail_id, "m2")
+            self.assertTrue(session.needs_fetch)
+        finally:
+            engine.store.close()
+
     def test_undo_restores_an_archive_and_an_unread_flag(self) -> None:
         engine = Engine.open(self.tmp.name, NullGmail())
         try:

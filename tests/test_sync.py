@@ -324,6 +324,31 @@ class SyncTests(unittest.TestCase):
         self.assertLess(calls.index("messages.get:nw:raw"), calls.index("messages.get:ar1:raw"))
         self.assertTrue(self.engine.store.body_readable("nw"))
 
+    def test_auto_trashed_mail_does_not_jump_the_body_queue(self) -> None:
+        self.engine.startup()
+        self.engine.store.mark_body_missing("ar1")
+        self.fake.add(
+            FakeMessage(
+                id="gone",
+                thread_id="t-gone",
+                label_ids=["TRASH"],
+                subject="Filtered",
+                from_addr="Bot <bot@example.com>",
+                body="auto deleted",
+                internal_date_ms=9_500,
+            )
+        )
+        self.fake.add_history(added("gone", "t-gone", ["TRASH"]))
+        self.fake.calls.clear()
+        self.engine.startup()
+        self.assertTrue(self.engine.store.has_metadata("gone"))
+        self.assertFalse(self.engine.store.body_readable("gone"))
+        self.assertNotIn("messages.get:gone:raw", self.fake.calls)
+        self.assertTrue(self.engine.store.body_readable("ar1"))
+        # Opening the message still downloads it.
+        self.engine.open_message("gone")
+        self.assertTrue(self.engine.store.body_readable("gone"))
+
     def test_caching_shows_how_many_bodies_remain(self) -> None:
         self.engine.startup()
         for index, date in enumerate((500, 400)):

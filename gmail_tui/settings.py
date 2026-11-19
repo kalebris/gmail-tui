@@ -22,6 +22,10 @@ class SettingsError(ValueError):
     pass
 
 
+# Bodies for these labels wait until the folder is open (or a message is).
+DEFAULT_ON_DEMAND = ("TRASH", "SPAM")
+
+
 @dataclass(frozen=True)
 class Settings:
     data: Path | None = None
@@ -34,6 +38,8 @@ class Settings:
     # Seal oauth.json with age-plugin-tpm; startup asks for the TPM PIN.
     oauth_tpm: bool = False
     oauth_tpm_identity: Path | None = None
+    # Gmail label ids whose bodies are not background-cached.
+    on_demand: tuple[str, ...] = DEFAULT_ON_DEMAND
 
 
 def xdg_config_home() -> Path:
@@ -128,6 +134,9 @@ def default_text(path: Path | None = None) -> str:
         "# oauth-tpm  yes → encrypt each account's oauth.json with a TPM age key\n"
         "#            (needs age + age-plugin-tpm on PATH; asks for the TPM PIN)\n"
         "# oauth-tpm-identity  optional path to that age-plugin-tpm identity file\n"
+        "# on-demand  label whose bodies wait until that folder is open\n"
+        "#            (default: TRASH and SPAM). One label per line.\n"
+        "#            on-demand none  → background-fetch every folder\n"
         "#\n"
         f"download {download}\n"
         f"data {data}\n"
@@ -136,6 +145,8 @@ def default_text(path: Path | None = None) -> str:
         "datetime %Y-%m-%d %H:%M\n"
         "weekday %a %d\n"
         "# oauth-tpm no\n"
+        "# on-demand TRASH\n"
+        "# on-demand SPAM\n"
     )
 
 
@@ -150,13 +161,16 @@ def load(path: Path | None = None) -> Settings:
 
 
 def apply(settings: Settings) -> None:
-    """Push date/time patterns into the shared format helpers."""
+    """Push date/time patterns and on-demand folders into shared helpers."""
     formats.configure(
         date_fmt=settings.date,
         time_fmt=settings.time,
         datetime_fmt=settings.datetime,
         weekday_fmt=settings.weekday,
     )
+    from gmail_tui import store
+
+    store.configure_on_demand(settings.on_demand)
 
 
 def parse(text: str) -> Settings:
@@ -170,6 +184,7 @@ def parse(text: str) -> Settings:
     seen_datetime = False
     oauth_tpm = False
     oauth_tpm_identity: Path | None = None
+    on_demand: list[str] | None = None
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -199,6 +214,16 @@ def parse(text: str) -> Settings:
             oauth_tpm = _bool(value, lineno)
         elif name == "oauth-tpm-identity":
             oauth_tpm_identity = _path(value)
+        elif name == "on-demand":
+            if on_demand is None:
+                on_demand = []
+            key = value.casefold()
+            if key in {"none", "off", "-"}:
+                on_demand = []
+                continue
+            if any(ch.isspace() for ch in value):
+                raise SettingsError(f"line {lineno}: on-demand takes one label")
+            on_demand.append(_on_demand_label(value, lineno))
         else:
             raise SettingsError(f"line {lineno}: unknown setting {name}")
     if not seen_datetime or datetime_fmt is None:
@@ -213,6 +238,7 @@ def parse(text: str) -> Settings:
         weekday=weekday_fmt,
         oauth_tpm=oauth_tpm,
         oauth_tpm_identity=oauth_tpm_identity,
+        on_demand=tuple(on_demand) if on_demand is not None else DEFAULT_ON_DEMAND,
     )
 
 
@@ -244,3 +270,24 @@ def _path(value: str) -> Path:
     if not path.is_absolute():
         path = Path.cwd() / path
     return path
+
+
+_ON_DEMAND_ALIASES = {
+    "trash": "TRASH",
+    "spam": "SPAM",
+    "bin": "TRASH",
+    "junk": "SPAM",
+    "deleted": "TRASH",
+}
+
+
+def _on_demand_label(value: str, lineno: int) -> str:
+    token = value.strip()
+    mapped = _ON_DEMAND_ALIASES.get(token.casefold(), token)
+    if not mapped or any(ch.isspace() for ch in mapped):
+        raise SettingsError(f"line {lineno}: on-demand needs a Gmail label id")
+    # System ids are TRASH/SPAM; user labels look like Label_12.
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+    if any(ch not in allowed for ch in mapped):
+        raise SettingsError(f"line {lineno}: invalid on-demand label {value!r}")
+    return mapped

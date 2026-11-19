@@ -113,6 +113,33 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.missing_body_ids(1, open_label="Label_1"), ["work"])
         self.assertEqual(self.store.next_priority_bodies("INBOX", 2), ["inbox"])
 
+    def test_trash_bodies_wait_until_trash_is_open(self) -> None:
+        from gmail_tui.store import configure_on_demand
+
+        configure_on_demand(("TRASH", "SPAM"))
+        try:
+            self.store.replace_labels(
+                [
+                    Label("INBOX", "INBOX", "system"),
+                    Label("TRASH", "TRASH", "system"),
+                    Label("SPAM", "SPAM", "system"),
+                    Label("Label_1", "Work", "user"),
+                ]
+            )
+            self.store.upsert_metadata(_message("keep", "t1", 5_000, "keep", ["INBOX"]), "missing")
+            self.store.upsert_metadata(_message("bin", "t2", 9_000, "trashed", ["TRASH"]), "missing")
+            self.store.upsert_metadata(_message("junk", "t3", 8_000, "spam", ["SPAM"]), "missing")
+            self.store.set_open_label("INBOX")
+            self.assertEqual(self.store.missing_body_ids(5), ["keep"])
+            self.assertEqual(self.store.next_priority_bodies("INBOX", 5), ["keep"])
+            self.assertEqual(self.store.missing_body_count(), 1)
+            self.store.set_open_label("TRASH")
+            self.assertEqual(self.store.next_priority_bodies("TRASH", 5)[0], "bin")
+            self.assertEqual(self.store.missing_body_ids(5, open_label="TRASH"), ["bin", "keep"])
+            self.assertNotIn("junk", self.store.missing_body_ids(5, open_label="TRASH"))
+        finally:
+            configure_on_demand(("TRASH", "SPAM"))
+
     def test_local_label_change_is_visible_and_queued(self) -> None:
         self.store.upsert_metadata(_message("m1", "t1", 1000, "hello", ["INBOX", "UNREAD"]), "missing")
         self.store.apply_local_labels("m1", add=["STARRED"], remove=["INBOX"])
