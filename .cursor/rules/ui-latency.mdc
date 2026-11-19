@@ -1,0 +1,14 @@
+---
+description: UI keypress latency is paramount for mail actions
+alwaysApply: true
+---
+
+# UI latency
+
+Least latency on the UI thread is paramount for mail keys (`j`/`k`, `x`, `d`, `e`, archive, mark, open).
+
+- No SQLite writes, folder recounts, or Gmail calls on the key that paints.
+- Leave-view delete/archive: memory first; `label_todo` / account thread persist later.
+- Paint before poking background store work.
+- Keep `d`/`e` as light as `x`. Guard with `tests/test_speed.py` (API touch counts + timing).
+- Full policy: `AGENTS.md`.

@@ -623,9 +623,6 @@ def _loop(
         if session.sixel_ready:
             session.sixel_ready = False
             dirty = True
-        if acted:
-            desk.poke.set()
-            acted = False
         if _flush_mail_alerts(desk, accounts):
             dirty = True
         if dirty:
@@ -639,6 +636,11 @@ def _loop(
             shown_ages = _tab_ages(accounts)
             header_at = _arm_header_watch(accounts)
             dirty = False
+        # Paint the key's frame before waking the account thread. A deferred
+        # archive/delete used to start its SQLite write during that paint.
+        if acted:
+            desk.poke.set()
+            acted = False
         if repeat is not None:
             _drop_held_keys(screen, pending, repeat)
             repeat = None

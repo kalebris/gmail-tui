@@ -686,6 +686,9 @@ class MailSession:
     def _targets(self) -> list[str]:
         if not self.messages:
             return []
+        if not self.selected:
+            index = _clamp(self.message_cursor, len(self.messages))
+            return list(self._row_ids(self.messages[index]))
         marked = [item for item in self.messages if _row_marked(item, self.selected)]
         if not marked:
             index = _clamp(self.message_cursor, len(self.messages))
@@ -712,17 +715,35 @@ class MailSession:
         self._push_undo(
             [(gmail_id, tuple(add_labels), tuple(remove_labels)) for gmail_id in targets]
         )
-        self.labels_stale = True
         if self.search_text or not self._leaves_current_view(add_labels, remove_labels):
+            self.labels_stale = True
             self.engine.store.apply_local_labels_batch(
                 [(gmail_id, add_labels, remove_labels) for gmail_id in targets]
             )
             self._reload_open_list(anchor, index)
             return
         # Leave the folder immediately; persist + push in the background.
+        # Skip labels_stale here — a full folder recount on the next tick made
+        # d feel heavier than x. Counts refresh once the store write lands.
+        self._note_left_inbox(targets, remove_labels)
         self._hidden.update(targets)
         self.label_todo.append((list(targets), add_labels, remove_labels))
         self._drop_acted(set(targets), index)
+
+    def _note_left_inbox(self, targets: list[str], remove_labels: list[str]) -> None:
+        """Adjust the tab badge without scanning every folder."""
+        if "INBOX" not in remove_labels or not targets:
+            return
+        gone = set(targets)
+        unread = 0
+        for item in self.messages:
+            ids = self._row_ids(item)
+            if not any(gmail_id in gone for gmail_id in ids):
+                continue
+            if item.unread:
+                unread += 1
+        self.inbox_count = max(0, self.inbox_count - len(targets))
+        self.inbox_unread = max(0, self.inbox_unread - unread)
 
     def flush_label_todo(self) -> bool:
         """Apply deferred archive/delete intents. True when anything was written."""
@@ -738,6 +759,7 @@ class MailSession:
                 done.add(gmail_id)
         self.engine.store.apply_local_labels_batch(changes)
         self._hidden -= done
+        self.labels_stale = True
         return True
 
     def _strip_hidden(self) -> None:

@@ -1,12 +1,15 @@
 """Changing messages stays local and cheap.
 
-A long saved body used to spend hundreds of milliseconds wrapping, and a
-delete used to recount every label and open another message before the next
-one appeared. These bounds fail if either of those comes back.
+UI key latency is paramount (see ``AGENTS.md``). A long saved body used to
+spend hundreds of milliseconds wrapping, and delete/archive used to write
+SQLite and recount every label on the keypress. These bounds fail if either
+of those comes back — including regressions that make ``d``/``e`` heavier
+than ``x``.
 """
 
 from __future__ import annotations
 
+import statistics
 import tempfile
 import time
 import unittest
@@ -15,7 +18,7 @@ from pathlib import Path
 from gmail_tui.gmail import IncomingMessage, Label, NullGmail
 from gmail_tui.links import present_links
 from gmail_tui.store import Store
-from gmail_tui.sync import BackgroundSync, Engine
+from gmail_tui.sync import BackgroundSync, Engine, UrgentWork
 from gmail_tui.textutil import html_to_text
 from gmail_tui.ui import MailSession, _display_width, layout_reader, render_lines, wrap_lines
 
@@ -178,9 +181,114 @@ class ChangeSpeedTests(unittest.TestCase):
             self.assertNotIn("newest body", "\n".join(session.reader_view))
             # Store write is deferred so the key stays as light as select.
             self.assertTrue(session.label_todo)
+            self.assertFalse(session.labels_stale)
             self.assertFalse(engine.store.has_pending_mutations())
             session.flush_label_todo()
+            self.assertTrue(session.labels_stale)
             self.assertTrue(engine.store.has_pending_mutations())
+        finally:
+            engine.store.close()
+
+    def test_leave_view_actions_match_select_on_the_key(self) -> None:
+        """``x``, ``d``, and ``e`` must not touch the store or label tree on the key.
+
+        Catching wall time alone still lets a synchronous SQLite write sneak
+        back onto delete/archive. Count the forbidden APIs instead.
+        """
+        for index in range(12):
+            self._save(
+                _message(f"m{index}", f"t{index}", 10_000 - index, f"Mail {index}", f"body {index}"),
+                f"body {index}",
+            )
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            session.focus = "list"
+            render_lines(session, 36, 120)
+            writes: list[str] = []
+            labels: list[str] = []
+            original_batch = Store.apply_local_labels_batch
+            original_labels = Store.list_label_info
+
+            def counting_batch(changes):
+                writes.append(f"batch:{len(changes)}")
+                return original_batch(engine.store, changes)
+
+            def counting_labels():
+                labels.append("labels")
+                return original_labels(engine.store)
+
+            engine.store.apply_local_labels_batch = counting_batch  # type: ignore[method-assign]
+            engine.store.list_label_info = counting_labels  # type: ignore[method-assign]
+            try:
+                session.toggle_selected()
+                self.assertEqual(writes, [])
+                self.assertEqual(labels, [])
+                self.assertFalse(session.labels_stale)
+                self.assertFalse(session.label_todo)
+
+                before = len(session.messages)
+                session.delete_selected()
+                self.assertEqual(len(session.messages), before - 1)
+                self.assertEqual(writes, [])
+                self.assertEqual(labels, [])
+                self.assertFalse(session.labels_stale)
+                self.assertTrue(session.label_todo)
+
+                before = len(session.messages)
+                session.archive_selected()
+                self.assertEqual(len(session.messages), before - 1)
+                self.assertEqual(writes, [])
+                self.assertEqual(labels, [])
+                self.assertFalse(session.labels_stale)
+                self.assertGreaterEqual(len(session.label_todo), 2)
+
+                urgent = UrgentWork(engine)
+                self.assertTrue(urgent.step(session))
+                self.assertTrue(session.labels_stale)
+                self.assertEqual(session.label_todo, [])
+                self.assertTrue(writes)
+                self.assertEqual(labels, [])
+            finally:
+                del engine.store.apply_local_labels_batch
+                del engine.store.list_label_info
+        finally:
+            engine.store.close()
+
+    def test_delete_stays_within_a_select_budget(self) -> None:
+        """Wall time: leave-view delete must stay near select, not a store write."""
+        for index in range(40):
+            body = f"body {index} " + ("x" * 2_000)
+            self._save(
+                _message(f"m{index}", f"t{index}", 50_000 - index, f"Mail {index}", body),
+                body,
+            )
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            session.focus = "list"
+            render_lines(session, 36, 120)
+
+            def timed(action, samples: int = 20) -> float:
+                times: list[float] = []
+                for _ in range(samples):
+                    started = time.perf_counter()
+                    action()
+                    times.append(time.perf_counter() - started)
+                return statistics.median(times)
+
+            select_ms = timed(session.toggle_selected) * 1000
+            # Drain marks so each delete acts on the cursor row alone.
+            session.selected.clear()
+            delete_ms = timed(session.delete_selected) * 1000
+            # Absolute cap catches a multi-ms SQLite commit; the ratio catches
+            # delete quietly growing while select stays tiny.
+            self.assertLess(select_ms, 5.0)
+            self.assertLess(delete_ms, 5.0)
+            self.assertLess(delete_ms, max(1.0, select_ms * 4.0))
+            self.assertTrue(session.label_todo)
+            self.assertFalse(session.labels_stale)
+            self.assertFalse(engine.store.has_pending_mutations())
         finally:
             engine.store.close()
 

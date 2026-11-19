@@ -738,6 +738,8 @@ class UrgentWork:
                 hidden = getattr(session, "_hidden", None)
                 if isinstance(hidden, set):
                     hidden -= item[1]
+                # Folder counts waited for this write; refresh them off the key.
+                session.labels_stale = True
                 continue
             if kind in {"error", "offline"}:
                 # Offline after sleep is transient; keep the next open/push armed.
