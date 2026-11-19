@@ -22,7 +22,13 @@ from gmail_tui.gmail import (
 )
 from gmail_tui.http_gmail import HttpStatus, is_precondition_failed, is_rate_limited
 from gmail_tui.quota import Quota, SyncStopped
-from gmail_tui.sync import BackgroundSync, Engine, UrgentWork
+from gmail_tui.sync import (
+    BackgroundSync,
+    Engine,
+    UrgentWork,
+    _network_not_ready,
+    _offline_retry_seconds,
+)
 from gmail_tui.tui import _job_due, _service
 from gmail_tui.ui import MailSession
 
@@ -882,16 +888,17 @@ class SyncTests(unittest.TestCase):
         job._poll_at = time.monotonic() - 1
         job.step()
         self.assertEqual(job.mode, "offline")
-        self.assertIn("name resolution", job.phase)
+        self.assertEqual(job.phase, "waiting for network")
         wait = job.seconds_until_poll()
         self.assertIsNotNone(wait)
-        self.assertGreater(wait, 0)
-        self.assertLessEqual(wait, 30)
+        self.assertGreater(wait, 30)
+        self.assertLessEqual(wait, 60)
         self.assertFalse(job.retry_due())
         self.assertFalse(_job_due(job))
         self.fake.history_offline = False
         self.fake.add(_inbox("later", "wake", 9_000, "After sleep"))
         self.fake.add_history(added("later", "t-later", ["INBOX", "UNREAD"]))
+        job._network_until = 0.0
         job._retry_at = time.monotonic() - 1
         self.assertTrue(_job_due(job))
         self.assertEqual(job.phase, "signing in")
@@ -1071,6 +1078,76 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(is_rate_limited(403, detail))
         self.assertTrue(is_rate_limited(429, "slow down"))
         self.assertFalse(is_rate_limited(403, "Insufficient Permission"))
+
+    def test_offline_calls_are_retried_before_parking_the_mailbox(self) -> None:
+        self.engine.startup()
+        calls = {"n": 0}
+        original = self.engine.gmail.get_profile
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise Offline("Network is unreachable")
+            return original()
+
+        self.engine.gmail.get_profile = flaky  # type: ignore[method-assign]
+        profile = self.engine._call(1, self.engine.gmail.get_profile)
+        self.assertEqual(profile.email, self.fake.email)
+        self.assertEqual(calls["n"], 3)
+
+    def test_resume_defers_cache_until_the_nic_has_time(self) -> None:
+        self.engine.startup()
+        job = BackgroundSync(self.engine)
+        while job.step():
+            pass
+        self.assertEqual(job.mode, "idle")
+        self.engine.store.mark_body_missing("ar1")
+        self.assertTrue(job.cache_due())
+        job._wall -= 120.0
+        self.assertTrue(job.note_clock())
+        self.assertFalse(job.cache_due())
+        self.assertFalse(_job_due(job))
+        self.assertGreater(job.seconds_until_poll() or 0, 0)
+        job._network_until = time.monotonic() - 1
+        self.assertTrue(job.cache_due())
+
+    def test_network_unreachable_waits_longer_and_shows_waiting(self) -> None:
+        self.assertTrue(_network_not_ready("Network is unreachable"))
+        self.assertTrue(_network_not_ready("[Errno 99] Cannot assign requested address"))
+        self.assertFalse(_network_not_ready("no Gmail token"))
+        self.assertEqual(_offline_retry_seconds(Offline("Network is unreachable")), 60.0)
+        self.assertEqual(_offline_retry_seconds(Offline("stopped")), 30.0)
+
+        self.engine.startup()
+        job = BackgroundSync(self.engine)
+        while job.step():
+            pass
+        job._poll_at = time.monotonic() - 1
+
+        def boom(*_args, **_kwargs):
+            raise Offline("Network is unreachable")
+
+        self.engine.gmail.list_history = boom  # type: ignore[method-assign]
+        job.step()
+        self.assertEqual(job.mode, "offline")
+        self.assertEqual(job.phase, "waiting for network")
+        wait = job.seconds_until_poll()
+        self.assertIsNotNone(wait)
+        self.assertGreater(wait, 30)
+
+    def test_urgent_offline_does_not_pause_forever(self) -> None:
+        self.engine.startup()
+        urgent = UrgentWork(self.engine)
+        session = MailSession(self.engine)
+        session.needs_fetch = True
+
+        def boom(_gmail_id):
+            raise Offline("Network is unreachable")
+
+        self.engine.open_message = boom  # type: ignore[method-assign]
+        self.assertTrue(urgent.step(session))
+        self.assertFalse(urgent.paused)
+        self.assertIn("unreachable", urgent.phase)
 
     def test_precondition_failures_are_retried_then_skipped_for_bodies(self) -> None:
         self.assertTrue(is_precondition_failed(400, "Precondition check failed."))

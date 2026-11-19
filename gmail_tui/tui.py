@@ -413,6 +413,8 @@ def _halt(desk: _Desk) -> None:
 def _account_work(desk: _Desk, slot: _Account, tab: Account) -> None:
     while not desk.stop.is_set():
         profile.checkpoint()
+        # Hibernate freezes the NIC; do not hammer Gmail before DHCP returns.
+        slot.job.note_clock()
         if _visible(desk, slot):
             try:
                 progressed = _sync_visible(desk, slot, tab)

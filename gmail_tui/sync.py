@@ -47,6 +47,10 @@ from gmail_tui.textutil import parse_rfc822
 _POLL_SECONDS = 60.0
 # After suspend the first DNS lookup often fails once. Wait, then try again.
 _RETRY_SECONDS = 30.0
+# Wi-Fi / DHCP after hibernate often needs longer than a single DNS blip.
+_NETWORK_RETRY_SECONDS = 60.0
+# Hold network work this long after the wall clock jumps (suspend/resume).
+_RESUME_GRACE_SECONDS = 15.0
 # Inbox RAW batches used to spend a whole Gmail minute in one step. Chunking
 # yields between steps so a second account can download while the first is busy.
 _INBOX_BODY_CHUNK = 10
@@ -561,11 +565,23 @@ class Engine:
 
     def _call(self, cost: int, fn):
         attempts = 0
+        offline_attempts = 0
         refreshed = False
         while True:
             self.quota.acquire(cost)
             try:
                 return fn()
+            except Offline:
+                # After sleep the first connect/DNS try often fails before the
+                # NIC has an address. A short retry beats parking the mailbox.
+                offline_attempts += 1
+                if offline_attempts <= 3:
+                    closer = getattr(self.gmail, "close", None)
+                    if callable(closer):
+                        closer()
+                    self.quota.backoff(offline_attempts)
+                    continue
+                raise
             except HttpStatus as exc:
                 if not refreshed and _unauthorized(exc) and self.refresh_auth(force=True):
                     refreshed = True
@@ -651,15 +667,19 @@ class UrgentWork:
             if job[0] == "open":
                 try:
                     self.engine.open_message(job[1])
-                except (Offline, GmailError) as exc:
-                    ready: tuple = ("error", str(exc), job)
+                except Offline as exc:
+                    ready: tuple = ("offline", str(exc), job)
+                except GmailError as exc:
+                    ready = ("error", str(exc), job)
                 else:
                     ready = ("open", job[1])
             else:
                 gmail_id, items = job[1], job[2]
                 try:
                     items, _rebased, remote = self.engine._push_one(gmail_id, items)
-                except (Offline, GmailError) as exc:
+                except Offline as exc:
+                    ready = ("offline", str(exc), job)
+                except GmailError as exc:
                     ready = ("error", str(exc), job)
                 else:
                     if remote is not None:
@@ -680,10 +700,13 @@ class UrgentWork:
             self._ready = []
         if not ready:
             return False
+        saw_fault = False
         for item in ready:
             kind = item[0]
-            if kind == "error":
-                self.paused = True
+            if kind in {"error", "offline"}:
+                # Offline after sleep is transient; keep the next open/push armed.
+                saw_fault = True
+                self.paused = kind == "error"
                 self.phase = item[1]
                 job = item[2]
                 if job[0] == "open":
@@ -691,7 +714,12 @@ class UrgentWork:
                 continue
             if kind == "open":
                 self._clear_fetch(session, item[1])
-        if not self.paused and not session.needs_fetch and not self.engine.store.has_pending_mutations():
+        if (
+            not saw_fault
+            and not self.paused
+            and not session.needs_fetch
+            and not self.engine.store.has_pending_mutations()
+        ):
             self.phase = ""
         session.urgent_phase = self.phase
         return True
@@ -764,6 +792,9 @@ class BackgroundSync:
         self._cache_done = 0
         self._cache_total = -1
         self._auth_pending = False
+        self._network_until = 0.0
+        self._wall = time.time()
+        self._mono = time.monotonic()
         # A finished replica only needs history. Re-listing the whole inbox on
         # every launch made a warm start feel like the first sync again.
         if (
@@ -789,6 +820,42 @@ class BackgroundSync:
                 self.total = 0
                 self.dirty = True
 
+    def note_clock(self) -> bool:
+        """Detect suspend/resume via wall-clock jump. True when network is deferred."""
+        wall = time.time()
+        mono = time.monotonic()
+        jumped = (wall - self._wall) - (mono - self._mono) >= 3.0
+        self._wall = wall
+        self._mono = mono
+        if not jumped:
+            return False
+        self.defer_network(_RESUME_GRACE_SECONDS)
+        return True
+
+    def defer_network(self, seconds: float = _RESUME_GRACE_SECONDS) -> None:
+        """Pause Gmail calls until DHCP/DNS usually catch up after wake."""
+        until = time.monotonic() + max(0.0, seconds)
+        self._network_until = max(self._network_until, until)
+        closer = getattr(self.engine.gmail, "close", None)
+        if callable(closer):
+            closer()
+        if self._poll_at > 0:
+            self._poll_at = max(self._poll_at, until)
+        if self.running or self.mode in {"offline", "error"}:
+            # Park mid-sync work so the account thread sleeps the grace out
+            # instead of spinning on a NIC that still has no address.
+            self.mode = "offline" if self.mode != "error" else self.mode
+            self._retry_at = max(self._retry_at, until)
+            self._auth_pending = False
+            self._polling = False
+            self.phase = "waiting for network"
+            self.done = 0
+            self.total = 1
+            self.dirty = True
+
+    def _network_ready(self) -> bool:
+        return time.monotonic() >= self._network_until
+
     def set_background_bodies(self, enabled: bool) -> None:
         """Stop or resume downloading bodies the user has not asked for."""
         self.engine.background_bodies = enabled
@@ -801,6 +868,8 @@ class BackgroundSync:
 
     def cache_due(self) -> bool:
         """True when an idle mailbox should resume background body downloads."""
+        if not self._network_ready():
+            return False
         if not self.engine.background_bodies or self.running or self.mode in {"offline", "error"}:
             return False
         return self._uncached_bodies()
@@ -811,7 +880,11 @@ class BackgroundSync:
             if self.engine.quota.stopped():
                 return False
             if self._auth_pending:
+                if not self._network_ready():
+                    return False
                 return self._refresh_auth_step()
+            if not self._network_ready():
+                return False
             if self.mode == "idle" and self.engine.background_bodies and self._uncached_bodies():
                 self._begin_backfill()
             if self.mode == "idle" and self.poll_due():
@@ -837,12 +910,16 @@ class BackgroundSync:
 
     def poll_due(self) -> bool:
         """True when an idle mailbox should look for new mail."""
+        if not self._network_ready():
+            return False
         if self.running or self.mode in {"offline", "error"}:
             return False
         return self._poll_wait() == 0.0
 
     def retry_due(self) -> bool:
         """True when an offline mailbox should start again."""
+        if not self._network_ready():
+            return False
         if self.mode not in {"offline", "error"}:
             return False
         if self._retry_at <= 0:
@@ -866,6 +943,8 @@ class BackgroundSync:
                 self.total = 0
                 self.dirty = True
             if self.mode in {"offline", "error"}:
+                # A manual check overrides the post-sleep DHCP grace.
+                self._network_until = 0.0
                 self._retry_at = time.monotonic()
                 self.dirty = True
                 return
@@ -900,13 +979,17 @@ class BackgroundSync:
         return True
 
     def seconds_until_poll(self) -> float | None:
+        grace = max(0.0, self._network_until - time.monotonic())
         if self.mode in {"offline", "error"}:
             if self._retry_at <= 0:
-                return _RETRY_SECONDS
-            return max(0.0, self._retry_at - time.monotonic())
+                return max(_RETRY_SECONDS, grace)
+            return max(0.0, self._retry_at - time.monotonic(), grace)
         if self.running:
             return None
-        return self._poll_wait()
+        wait = self._poll_wait()
+        if wait is None:
+            return None if grace <= 0 else grace
+        return max(wait, grace)
 
     def _history_start(self) -> str | None:
         return self.engine.store.history_id() or self.engine.store.bootstrap_history_id()
@@ -1031,7 +1114,13 @@ class BackgroundSync:
         self._auth_pending = False
         self._polling = False
         self._hist_page = None
-        self._retry_at = time.monotonic() + _RETRY_SECONDS
+        wait = _offline_retry_seconds(exc)
+        self._retry_at = time.monotonic() + wait
+        if self._network_until > self._retry_at:
+            self._retry_at = self._network_until
+        # No address yet: give DHCP another full grace window before the retry.
+        if isinstance(exc, Offline) and _network_not_ready(str(exc)):
+            self.defer_network(max(_RESUME_GRACE_SECONDS, wait))
         self.dirty = True
         closer = getattr(self.engine.gmail, "close", None)
         if callable(closer):
@@ -1659,6 +1748,36 @@ class BackgroundSync:
 def _minute_quota(detail: str) -> bool:
     text = detail.lower()
     return "per minute" in text or "userratelimitexceeded" in text
+
+
+def _network_not_ready(detail: str) -> bool:
+    """True when the failure looks like no link/DNS yet (common after hibernate)."""
+    text = detail.lower()
+    needles = (
+        "network is unreachable",
+        "network unreachable",
+        "no route to host",
+        "name resolution",
+        "name or service not known",
+        "temporary failure",
+        "errno 101",
+        "errno 99",
+        "errno 113",
+        "enetunreach",
+        "ehostunreach",
+        "enetdown",
+        "network down",
+        "cannot assign requested address",
+        "network is down",
+        "host is down",
+    )
+    return any(item in text for item in needles)
+
+
+def _offline_retry_seconds(exc: Exception) -> float:
+    if isinstance(exc, Offline) and _network_not_ready(str(exc)):
+        return _NETWORK_RETRY_SECONDS
+    return _RETRY_SECONDS
 
 
 def _unauthorized(exc: BaseException) -> bool:

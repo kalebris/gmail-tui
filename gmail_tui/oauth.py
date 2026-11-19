@@ -237,7 +237,7 @@ def exchange_code(
     )
 
 
-def refresh_access_token(stored: StoredAuth, *, token_url: str = TOKEN_URL, timeout: float = 60) -> Token:
+def refresh_access_token(stored: StoredAuth, *, token_url: str = TOKEN_URL, timeout: float = 20) -> Token:
     token = _post_token(
         token_url,
         {
