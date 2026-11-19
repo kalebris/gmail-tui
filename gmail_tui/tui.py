@@ -36,6 +36,7 @@ from gmail_tui.ui import (
     mark_spans,
     reader_hyperlinks,
     reader_match,
+    render_account_tabs,
     render_lines,
     status_bar,
 )
@@ -605,6 +606,7 @@ def _loop(
     acted = False
     shown_status: tuple | None = None
     shown_ages: tuple[str, ...] | None = None
+    header_at = 0.0
     while True:
         session = desk.session
         if session.poll_external_edit():
@@ -635,6 +637,7 @@ def _loop(
                 _paint(screen, session, accounts, desk.index)
                 shown_status = _status_stamp(session)
             shown_ages = _tab_ages(accounts)
+            header_at = _arm_header_watch(accounts)
             dirty = False
         if repeat is not None:
             _drop_held_keys(screen, pending, repeat)
@@ -642,7 +645,7 @@ def _loop(
         if pending:
             key = pending.pop(0)
         else:
-            screen.timeout(_input_timeout(desk, session, urgent))
+            screen.timeout(_input_timeout(desk, session, urgent, header_at=header_at))
             try:
                 key = screen.get_wch()
             except curses.error:
@@ -653,8 +656,12 @@ def _loop(
                     continue
                 _pull_check_times(accounts, desk)
                 ages = _tab_ages(accounts)
-                if ages != shown_ages:
-                    dirty = True
+                due = header_at > 0 and time.monotonic() >= header_at
+                if desk.mode != "calendar" and (ages != shown_ages or due):
+                    if ages != shown_ages:
+                        _paint_tabs(screen, session, accounts, desk.index)
+                        shown_ages = ages
+                    header_at = _arm_header_watch(accounts)
                 if _service(session, job, urgent):
                     dirty = True
                 elif not dirty:
@@ -910,11 +917,19 @@ _BUSY_WAIT_MS = 250
 # A finished open or label push should show up quickly. The key itself
 # already moved the screen.
 _URGENT_WAIT_MS = 200
+# Account-tab check ages tick once a second; a full paint resets this.
+_HEADER_WAIT_MS = 1000
 # After quit, give a stuck download this long to notice the closed socket.
 _QUIT_JOIN_SECONDS = 2.0
 
 
-def _input_timeout(desk: _Desk, session: MailSession, urgent: UrgentWork) -> int:
+def _input_timeout(
+    desk: _Desk,
+    session: MailSession,
+    urgent: UrgentWork,
+    *,
+    header_at: float = 0.0,
+) -> int:
     if session.external is not None or session.marking:
         return _BUSY_WAIT_MS
     if session.sixel_pending or session.sixel_ready:
@@ -929,8 +944,25 @@ def _input_timeout(desk: _Desk, session: MailSession, urgent: UrgentWork) -> int
     if any(slot.job.running for slot in desk.jobs):
         if session.sync_total <= 0:
             return _BUSY_WAIT_MS
-        return _PROGRESS_WAIT_MS
-    return _poll_timeout(desk)
+        return _header_cap(_PROGRESS_WAIT_MS, header_at)
+    return _header_cap(_poll_timeout(desk), header_at)
+
+
+def _header_cap(wait: int, header_at: float) -> int:
+    """Wake by the header watchdog so check ages keep ticking."""
+    if header_at <= 0:
+        return wait
+    due = max(1, int((header_at - time.monotonic()) * 1000))
+    if wait < 0:
+        return due
+    return min(wait, due)
+
+
+def _arm_header_watch(accounts: list[Account]) -> float:
+    """Next time the tab row should refresh. Zero when no check age is shown."""
+    if any(account.checked_at is not None for account in accounts):
+        return time.monotonic() + _HEADER_WAIT_MS / 1000.0
+    return 0.0
 
 
 def _needs_attention(slot: _Account) -> bool:
@@ -1017,6 +1049,34 @@ def _service(session: MailSession, job: BackgroundSync, urgent: UrgentWork) -> b
 def _paint_status(screen: curses.window, session: MailSession) -> None:
     """Rewrite the bottom line. The messages above it stay as they are."""
     _write_status(screen, session)
+    try:
+        screen.refresh()
+    except curses.error:
+        return
+
+
+def _paint_tabs(
+    screen: curses.window,
+    session: MailSession,
+    accounts: list[Account],
+    active: int,
+) -> None:
+    """Rewrite the account tab row. Panes underneath stay as they are."""
+    height, width = screen.getmaxyx()
+    if height < 2 or width < 2:
+        return
+    line = render_account_tabs(session, accounts, active, width)
+    if session.painted:
+        painted = list(session.painted)
+        painted[0] = line
+        session.painted = painted
+    try:
+        screen.move(0, 0)
+        screen.clrtoeol()
+    except curses.error:
+        return
+    _add(screen, 0, 0, line, 0)
+    _highlight_tab(screen, session, active)
     try:
         screen.refresh()
     except curses.error:

@@ -1036,8 +1036,11 @@ class BackgroundSync:
     def _poll_wait(self) -> float | None:
         if not self._history_start():
             return None
+        # Arm on first ask. A warm, fully-cached mailbox used to sit idle with
+        # `_poll_at == 0` forever, so the 60s check never ran until the user
+        # pressed s/S.
         if self._poll_at <= 0:
-            return _POLL_SECONDS
+            self._poll_at = time.monotonic() + _POLL_SECONDS
         return max(0.0, self._poll_at - time.monotonic())
 
     def _poll_due(self) -> bool:
@@ -1060,10 +1063,8 @@ class BackgroundSync:
             return False
         if not self._history_start():
             return False
-        if self._poll_at <= 0:
-            self._poll_at = time.monotonic() + _POLL_SECONDS
-            return False
-        return time.monotonic() >= self._poll_at
+        wait = self._poll_wait()
+        return wait is not None and wait <= 0.0
 
     def _begin_poll(self) -> None:
         if self.engine.wake_due_snoozes():

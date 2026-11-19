@@ -3117,6 +3117,19 @@ def format_check_age(checked_at: float | None, *, now: float | None = None) -> s
     return f"{seconds // 86400}d"
 
 
+def render_account_tabs(
+    session: MailSession,
+    accounts: list[Account] | None,
+    active: int,
+    width: int,
+) -> str:
+    """Account tab row only. Updates ``session.account_spans`` for clicks."""
+    accounts = _accounts_for(session, accounts, active)
+    canvas = _Canvas(1, max(1, width))
+    _write_tabs(canvas, session, accounts, active, max(1, width))
+    return canvas.lines()[0]
+
+
 def _write_tabs(canvas: _Canvas, session: MailSession, accounts: list[Account], active: int, width: int) -> None:
     spans: list[tuple[int, int, int]] = []
     column = 0

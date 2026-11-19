@@ -960,6 +960,32 @@ class SyncTests(unittest.TestCase):
         self.assertTrue(any(call.startswith("history.list:") for call in self.fake.calls))
         self.assertNotIn("messages.list:label=INBOX:q=", self.fake.calls)
 
+    def test_idle_mailbox_arms_the_periodic_check(self) -> None:
+        """A fully cached warm start must still schedule the 60s history poll."""
+        self.engine.startup()
+        job = BackgroundSync(self.engine)
+        while job.step():
+            pass
+        self.assertEqual(job.mode, "idle")
+        # Asking when the next check is due arms `_poll_at` once.
+        wait = job.seconds_until_poll()
+        self.assertIsNotNone(wait)
+        self.assertGreater(wait, 0)
+        self.assertLessEqual(wait, 60)
+        self.assertGreater(job._poll_at, 0)
+        self.assertFalse(job.poll_due())
+        job._poll_at = time.monotonic() - 1
+        self.assertTrue(job.poll_due())
+        self.fake.add(_inbox("late", "body", 9_900, "Arrived later"))
+        self.fake.add_history(added("late", "t-late", ["INBOX", "UNREAD"]))
+        self.fake.calls.clear()
+        while job.step():
+            pass
+        self.assertEqual(job.mode, "idle")
+        self.assertTrue(any(call.startswith("history.list:") for call in self.fake.calls))
+        self.assertTrue(self.engine.store.has_metadata("late"))
+        self.assertIsNotNone(job.checked_at)
+
     def test_check_mail_starts_a_poll_on_the_idle_mailbox(self) -> None:
         self.engine.startup()
         job = BackgroundSync(self.engine)

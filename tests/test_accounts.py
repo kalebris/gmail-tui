@@ -472,6 +472,14 @@ class AccountTests(unittest.TestCase):
                 self.assertGreaterEqual(_input_timeout(desk, slot.session, slot.urgent), 20_000)
                 slot.job.mode = "backfill"
                 self.assertEqual(_input_timeout(desk, slot.session, slot.urgent), 1000)
+                # A shown check age arms the header watchdog to one second.
+                slot.job.mode = "idle"
+                desk.accounts[0].checked_at = time.time()
+                header_at = time.monotonic() + 1.0
+                self.assertLessEqual(
+                    _input_timeout(desk, slot.session, slot.urgent, header_at=header_at),
+                    1000,
+                )
             finally:
                 desk.stop.set()
                 desk.poke.set()
