@@ -2779,6 +2779,24 @@ class MailboxTests(unittest.TestCase):
         finally:
             engine.store.close()
 
+    def test_account_tab_shows_last_check_age(self) -> None:
+        from gmail_tui.ui import format_check_age
+
+        self.assertEqual(format_check_age(None), "")
+        self.assertEqual(format_check_age(100.0, now=112.0), "12s")
+        self.assertEqual(format_check_age(100.0, now=100.0 + 3 * 60), "3m")
+        self.assertEqual(format_check_age(100.0, now=100.0 + 2 * 3600), "2h")
+        self.assertEqual(format_check_age(100.0, now=100.0 + 86400), "1d")
+        self.store.set_email("ada@example.com")
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            tab = Account("ada@example.com", Path(self.tmp.name), 2, 1, checked_at=time.time() - 45)
+            header = render_lines(session, 32, 120, [tab], 0)[0]
+            self.assertTrue(header.startswith("* ada@example.com  1 [2]  45s"))
+        finally:
+            engine.store.close()
+
     def test_escape_then_l_is_add_label(self) -> None:
         keys = defaults()
         self.assertTrue(_is_escape("\x1b"))

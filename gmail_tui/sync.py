@@ -823,6 +823,8 @@ class BackgroundSync:
         self._poll_new = 0
         self.mail_alert = 0
         self.list_bump = False
+        # Wall time of the last history page that finished without error.
+        self.checked_at: float | None = None
         self._resume_mode = ""
         self._poll_at = 0.0
         self._retry_at = 0.0
@@ -1588,6 +1590,8 @@ class BackgroundSync:
             self._hist_token = next_token
             self.phase = f"history {self.report.history_records}"
             return
+        # Full history catch-up finished; the account tab can show how fresh it is.
+        self.checked_at = time.time()
         if self._polling:
             self._finish_poll()
             return

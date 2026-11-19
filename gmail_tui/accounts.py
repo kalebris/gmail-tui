@@ -30,6 +30,8 @@ class Account:
     inbox: int = 0
     unread: int = 0
     local_messages: int = 0
+    # Wall time of the last successful Gmail history check for this mailbox.
+    checked_at: float | None = None
 
 
 def account_root(data: Path, email: str) -> Path:

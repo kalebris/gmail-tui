@@ -67,6 +67,14 @@ class SyncTests(unittest.TestCase):
         self.engine.store.close()
         self.tmp.cleanup()
 
+    def test_successful_history_sets_checked_at(self) -> None:
+        job = BackgroundSync(self.engine)
+        self.assertIsNone(job.checked_at)
+        while job.step():
+            pass
+        self.assertIsNotNone(job.checked_at)
+        self.assertEqual(job.mode, "idle")
+
     def test_startup_order_downloads_view_before_backfill(self) -> None:
         label, threads = self.engine.local_threads()
         self.assertEqual(label, "INBOX")

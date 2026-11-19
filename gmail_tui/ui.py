@@ -5,7 +5,8 @@ A thread with more than one saved message is one row, marked with a count.
 ``zo`` opens its tree, ``zc`` closes it, and ``za`` toggles it. Messages saved
 under other labels stay in that tree. The bottom-right pane is the open message. Moving the
 list selection opens the message. A tab row above the frame names each
-account, with its unread count and the inbox count in brackets. ``x``
+account, with its unread count, the inbox count in brackets, and how long
+ago the last successful Gmail check finished. ``x``
 marks messages so archive, delete, and label changes apply to every marked row.
 """
 
@@ -3102,12 +3103,28 @@ def _accounts_for(session: MailSession, accounts: list[Account] | None, active: 
     return accounts
 
 
+def format_check_age(checked_at: float | None, *, now: float | None = None) -> str:
+    """Compact age for the account tab, e.g. ``12s``, ``3m``, ``2h``, ``1d``."""
+    if checked_at is None:
+        return ""
+    seconds = max(0, int((time.time() if now is None else now) - checked_at))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
 def _write_tabs(canvas: _Canvas, session: MailSession, accounts: list[Account], active: int, width: int) -> None:
     spans: list[tuple[int, int, int]] = []
     column = 0
     for index, account in enumerate(accounts):
         mark = "* " if index == active else "  "
-        text = f"{mark}{account.name}  {account.unread} [{account.inbox}]"
+        age = format_check_age(account.checked_at)
+        suffix = f"  {age}" if age else ""
+        text = f"{mark}{account.name}  {account.unread} [{account.inbox}]{suffix}"
         if index:
             gap = " │ "
             if column + len(gap) >= width:

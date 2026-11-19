@@ -30,6 +30,7 @@ from gmail_tui.ui import (
     MailSession,
     _clip,
     _display_width,
+    format_check_age,
     geometry,
     help_lines,
     mark_spans,
@@ -455,6 +456,9 @@ def _account_work(desk: _Desk, slot: _Account, tab: Account) -> None:
         try:
             if _job_due(slot.job):
                 slot.job.step()
+                checked = slot.job.checked_at
+                if checked is not None:
+                    tab.checked_at = checked
                 if slot.job.dirty or slot.job.mail_alert:
                     _remember(desk, tab, slot)
                 progressed = True
@@ -509,10 +513,25 @@ def _remember(desk: _Desk, tab: Account, slot: _Account) -> None:
     # The open tab's badge is drawn from the session. Switching in clears the
     # job's dirty flag, so without this the badge fell back to older counts.
     slot.session.inbox_count, slot.session.inbox_unread = tab.inbox, tab.unread
+    checked = getattr(slot.job, "checked_at", None)
+    if checked is not None:
+        tab.checked_at = checked
     email = slot.engine.store.account_email()
     if email:
         tab.name = email
     _queue_mail_alert(desk, tab, slot)
+
+
+def _pull_check_times(accounts: list[Account], desk: _Desk) -> None:
+    """Copy each job's last successful check onto its tab for the header."""
+    for tab, slot in zip(accounts, desk.jobs):
+        checked = getattr(slot.job, "checked_at", None)
+        if checked is not None:
+            tab.checked_at = checked
+
+
+def _tab_ages(accounts: list[Account], *, now: float | None = None) -> tuple[str, ...]:
+    return tuple(format_check_age(account.checked_at, now=now) for account in accounts)
 
 
 def _flush_mail_alerts(desk: _Desk, accounts: list[Account]) -> bool:
@@ -585,6 +604,7 @@ def _loop(
     dirty = True
     acted = False
     shown_status: tuple | None = None
+    shown_ages: tuple[str, ...] | None = None
     while True:
         session = desk.session
         if session.poll_external_edit():
@@ -607,12 +627,14 @@ def _loop(
         if _flush_mail_alerts(desk, accounts):
             dirty = True
         if dirty:
+            _pull_check_times(accounts, desk)
             if desk.mode == "calendar":
                 _paint_calendar(screen, desk, accounts)
                 shown_status = ("calendar", desk.calendar.notice, desk.calendar.layout, desk.calendar.cursor)
             else:
                 _paint(screen, session, accounts, desk.index)
                 shown_status = _status_stamp(session)
+            shown_ages = _tab_ages(accounts)
             dirty = False
         if repeat is not None:
             _drop_held_keys(screen, pending, repeat)
@@ -629,9 +651,13 @@ def _loop(
                     if cal is not None and cal.poll_cache_update():
                         dirty = True
                     continue
+                _pull_check_times(accounts, desk)
+                ages = _tab_ages(accounts)
+                if ages != shown_ages:
+                    dirty = True
                 if _service(session, job, urgent):
                     dirty = True
-                else:
+                elif not dirty:
                     status = _status_stamp(session)
                     if status != shown_status:
                         _paint_status(screen, session)
