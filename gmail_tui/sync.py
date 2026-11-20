@@ -61,6 +61,10 @@ _RESUME_GRACE_SECONDS = 15.0
 # Inbox RAW batches used to spend a whole Gmail minute in one step. Chunking
 # yields between steps so a second account can download while the first is busy.
 _INBOX_BODY_CHUNK = 10
+# After a quiet history check the minute is nearly full. One larger RAW batch
+# (~half the budget) clears a small burst of new mail; later steps stay at 10.
+_INBOX_BODY_BURST = 50  # 3000 units / 60
+_INBOX_BURST_WHEN = 5000.0
 
 
 @dataclass
@@ -1354,12 +1358,18 @@ class BackgroundSync:
         open_label = self.engine.store.open_label()
         ids = self.engine.store.next_priority_bodies(
             open_label,
-            self.engine.quota.available(UNITS_GET_RAW, _INBOX_BODY_CHUNK),
+            self.engine.quota.available(UNITS_GET_RAW, self._priority_body_limit()),
         )
         if ids:
             self._download_priority(ids, open_label)
             return True
         return False
+
+    def _priority_body_limit(self) -> int:
+        """How many RAW gets to batch. Burst once when the minute is still fat."""
+        if self.engine.quota.remaining() > _INBOX_BURST_WHEN:
+            return _INBOX_BODY_BURST
+        return _INBOX_BODY_CHUNK
 
     def _download_priority(self, ids: list[str], open_label: str) -> None:
         done, total = self._priority_body_counts(open_label)

@@ -116,16 +116,61 @@ class SyncTests(unittest.TestCase):
         )
         self.assertEqual(self.fake.calls.count("messages.batch:raw:10"), 1)
 
-    def test_inbox_bodies_yield_between_chunks(self) -> None:
-        for index in range(14):
-            self.fake.add(_inbox(f"m{index}", "body", 4_000 + index, f"Note {index}"))
-        self.engine.startup()
-        batches = [call for call in self.fake.calls if call.startswith("messages.batch:raw:")]
-        self.assertEqual(batches[:2], ["messages.batch:raw:10", "messages.batch:raw:5"])
-        self.assertLess(
-            self.fake.calls.index("messages.batch:raw:5"),
-            self.fake.calls.index("messages.get:ar1:raw"),
-        )
+    def test_inbox_bodies_burst_when_the_minute_is_fat(self) -> None:
+        """After a quiet minute, priority RAW may take ~half the budget once."""
+        clock = {"t": 1_000.0}
+
+        def now() -> float:
+            return clock["t"]
+
+        def sleep(seconds: float) -> None:
+            clock["t"] += seconds
+
+        root = Path(self.tmp.name) / "burst"
+        engine = Engine.open(root, self.fake, sleeper=sleep, now=now)
+        try:
+            engine.startup()
+            # Expire the bootstrap spend so the next body pass sees a fat minute.
+            clock["t"] += 60.0
+            self.assertGreater(engine.quota.remaining(), 5000)
+            for index in range(55):
+                message = _inbox(f"m{index}", "body", 8_000 + index, f"Note {index}")
+                self.fake.add(message)
+                engine.store.upsert_metadata(
+                    IncomingMessage(
+                        gmail_id=message.id,
+                        thread_id=message.thread_id,
+                        label_ids=list(message.label_ids),
+                        subject=message.subject,
+                        from_addr=message.from_addr,
+                        snippet=message.subject,
+                        internal_date_ms=message.internal_date_ms,
+                    ),
+                    "missing",
+                )
+            self.fake.calls.clear()
+            job = BackgroundSync(engine)
+            self.assertEqual(job._priority_body_limit(), 50)
+            self.assertTrue(job._serve_inbox())
+            self.assertIn("messages.batch:raw:50", self.fake.calls)
+            self.assertLessEqual(engine.quota.remaining(), 5000)
+            self.assertEqual(job._priority_body_limit(), 10)
+            self.fake.calls.clear()
+            self.assertTrue(job._serve_inbox())
+            # Five left after the burst; normal pacing would allow up to 10.
+            self.assertIn("messages.batch:raw:5", self.fake.calls)
+        finally:
+            engine.store.close()
+
+    def test_priority_body_limit_bursts_only_above_5000(self) -> None:
+        from gmail_tui.sync import _INBOX_BODY_BURST, _INBOX_BODY_CHUNK
+
+        job = BackgroundSync(self.engine)
+        self.assertGreater(job.engine.quota.remaining(), 5000)
+        self.assertEqual(job._priority_body_limit(), _INBOX_BODY_BURST)
+        job.engine.quota.acquire(1001)
+        self.assertLessEqual(job.engine.quota.remaining(), 5000)
+        self.assertEqual(job._priority_body_limit(), _INBOX_BODY_CHUNK)
 
     def test_inbox_bodies_spread_a_fast_connection(self) -> None:
         clock = {"t": 1_000.0}
@@ -1081,11 +1126,13 @@ class SyncTests(unittest.TestCase):
             clock["t"] += seconds
 
         quota = Quota(6_000, sleeper=sleep, now=now)
+        self.assertEqual(quota.remaining(), 6_000)
         self.assertEqual(quota.available(60, 100), 100)
         self.assertEqual(clock["t"], 0.0)
         for _ in range(100):
             quota.acquire(60)
         self.assertEqual(clock["t"], 0.0)
+        self.assertEqual(quota.remaining(), 0)
         self.assertEqual(quota.available(60, 100), 100)
         self.assertGreaterEqual(clock["t"], 60)
 

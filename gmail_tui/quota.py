@@ -80,6 +80,12 @@ class Quota:
                     self._window.append(self._entry(cost))
                     return
 
+    def remaining(self) -> float:
+        """Units still free in the current minute. Does not wait."""
+        with self._lock:
+            self._trim()
+            return max(0.0, self.per_minute - self._used())
+
     def available(self, unit_cost: int, limit: int) -> int:
         """How many calls of ``unit_cost`` fit in this minute, waiting until one does."""
         if unit_cost <= 0 or limit <= 0:
