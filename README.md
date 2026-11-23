@@ -42,7 +42,7 @@ Links and HTML parts open with `xdg-open`. Set `open` to use another program; th
 open firefox -P settings
 ```
 
-That line applies to every profile. `~/.config/gmail-tui/profiles/work` (same folder as `config`, one file per `--profile` name) overrides it for that profile and contains only an `open` line. `O` opens the next link in the message. With the default `xdg-open`, a click still uses the terminal's OSC 8 hyperlink. A custom `open` command is what a click on the word `link` runs. Saved attachments stay on `xdg-open`.
+That line applies to every profile. `~/.config/gmail-tui/profiles/work` (same folder as `config`, one file per `--profile` name) overrides it for that profile and contains only an `open` line. Home Manager writes both from `programs.gmail-tui.settings` and `programs.gmail-tui.profiles.<name>.open`. `O` opens the next link in the message. With the default `xdg-open`, a click still uses the terminal's OSC 8 hyperlink. A custom `open` command is what a click on the word `link` runs, and what opens an HTML part. Saved attachments stay on `xdg-open`.
 
 If you previously used `gtui`, move or symlink the old dirs:
 
@@ -142,21 +142,25 @@ use the system `pkgs`, e.g. `useGlobalPkgs = false`).
   programs.gmail-tui = {
     enable = true;
 
-    # Optional: write `data …` into ~/.config/gmail-tui/config (mail store root).
-    # storeDir = "${config.home.homeDirectory}/mail/gmail-tui";
+    # Shared ~/.config/gmail-tui/config. Unset options keep the app default.
+    settings = {
+      # data = "${config.home.homeDirectory}/mail/gmail-tui";
+      # accounts = [ "ada@example.com" "bea@example.com" ];
+      # download = "~/Downloads";
+      # open = [ "xdg-open" ];
+    };
 
     # PATH wrappers: gmail-tui-work / gmail-tui-home.
-    # Shared config + keys; separate index/tokens under <data>/<profile>/.
-    profiles = [ "work" "home" ];
+    # open is that profile's link command (profiles/<name> next to the config).
+    # A list of names still works: profiles = [ "work" "home" ];
+    profiles = {
+      work.open = [ "firefox" "-P" "settings" ];
+      home = { };
+    };
 
     # Decrypted Google Desktop OAuth client JSON (string path — not a Nix path).
     # Installs gmail-tui-login and gmail-tui-<profile>-login on PATH.
     clientJson = config.age.secrets.gmail-tui-client.path;
-
-    # Optional managed config lines (only when storeDir is set):
-    # extraConfig = ''
-    #   account ada@example.com
-    # '';
 
     # Optional key overrides → ~/.config/gmail-tui/keys
     # keys = { archive = [ "e" ]; };
