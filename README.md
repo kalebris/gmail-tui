@@ -21,7 +21,8 @@ are a poor fit — a directory means `<dir>/config`, and keys default to `<dir>/
 `--data DIR` still overrides the mail store from that file. `--profile NAME` (or
 `GMAIL_TUI_PROFILE`) keeps that shared config and uses `<data>/NAME/` for the
 index and tokens instead — handy for separate “home” / “work” mailboxes without
-duplicating key bindings. To choose the top-bar order, add one `account` line per
+duplicating key bindings. `profiles/<name>` next to the config file can override
+`open` for that profile. To choose the top-bar order, add one `account` line per
 address in `~/.config/gmail-tui/config`. The file order is left to right. A mailbox
 you leave out still shows up, after the ones you named. Date stamps (mail list,
 calendar, CLI) share strftime patterns from the same file:
@@ -34,6 +35,14 @@ time %H:%M
 datetime %Y-%m-%d %H:%M
 weekday %a %d
 ```
+
+Links and HTML parts open with `xdg-open`. Set `open` to use another program; the URL or HTML file is added as the last argument:
+
+```
+open firefox -P settings
+```
+
+That line applies to every profile. `~/.config/gmail-tui/profiles/work` (same folder as `config`, one file per `--profile` name) overrides it for that profile and contains only an `open` line. `O` opens the next link in the message. With the default `xdg-open`, a click still uses the terminal's OSC 8 hyperlink. A custom `open` command is what a click on the word `link` runs. Saved attachments stay on `xdg-open`.
 
 If you previously used `gtui`, move or symlink the old dirs:
 
@@ -382,7 +391,8 @@ snooze, inbox, help.
 | `A` / `m` / `v` | attachments / MIME parts / show picture |
 | `V` | raw message source (every header, MIME boundary, encoded part); `V` or `Esc` returns |
 | `F` | show all header fields, or back to From/To/Date/Subject (stays on for later messages) |
-| `L` | hide link addresses: only the word `link` stays, and it still opens the URL in terminals with OSC 8 hyperlinks (foot, kitty, Alacritty, …); `L` again shows them |
+| `L` | hide link addresses: only the word `link` stays; `L` again shows them |
+| `O` | open the next link (`open` in the config, or `xdg-open`) |
 | `a`/`e`, `b`, `d`, `l`, `u`, `n`, `U`, `H` | archive, snooze, delete, label, unread, undo, holding |
 
 `c`, `r`, and `R` open `$EDITOR` in a new terminal (`GMAIL_TUI_TERMINAL` is that command; otherwise kitty, foot, alacritty, and the other common terminals). This window keeps running, so other mail can be read while the message is written. When the editor exits, a dialog offers Send or Save as draft. Drag with the mouse to highlight text; the selection is copied.
@@ -421,7 +431,7 @@ Event drafts are plain text (`Title`, `When`, `Until`, `Kind: timed|all-day`, �
 | Keys | Does |
 | --- | --- |
 | `j`/`k` | next / previous part |
-| `Enter` | open HTML in the browser (`xdg-open` on a temp file) |
+| `Enter` | open HTML with the `open` command (`xdg-open` on a temp file by default) |
 | `Esc` | back to the message |
 | `q` / `←` | back to the mail list |
 | `A` | list attachments |

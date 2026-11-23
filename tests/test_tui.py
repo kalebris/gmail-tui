@@ -1332,10 +1332,10 @@ class MailboxTests(unittest.TestCase):
             session.move(1)
             opened: list[Path] = []
 
-            def fake_open(path: Path) -> None:
-                opened.append(path)
+            def fake_open(target: str) -> None:
+                opened.append(Path(target))
 
-            session._xdg_open = fake_open  # type: ignore[method-assign]
+            session._open_browser = fake_open  # type: ignore[method-assign]
             session.activate()
             self.assertEqual(len(opened), 1)
             self.assertTrue(opened[0].is_file())
@@ -1343,6 +1343,45 @@ class MailboxTests(unittest.TestCase):
             self.assertIn("<p>HTML BODY</p>", opened[0].read_text(encoding="utf-8"))
             self.assertIn(str(opened[0]), session.notice)
             opened[0].unlink(missing_ok=True)
+        finally:
+            engine.store.close()
+
+    def test_open_link_uses_the_configured_command(self) -> None:
+        from gmail_tui.ui import ReaderMark
+
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            session.reader_view = [
+                "See link https://example.com/a",
+                "and link https://example.com/b",
+            ]
+            session.reader_marks = [
+                ReaderMark(links=((4, "https://example.com/a"),)),
+                ReaderMark(links=((4, "https://example.com/b"),)),
+            ]
+            session.open_command = ("firefox", "-P", "settings")
+            spawned: list[list[str]] = []
+
+            def fake_open(target: str) -> None:
+                spawned.append([*session.open_command, target])
+
+            session._open_browser = fake_open  # type: ignore[method-assign]
+            session.open_link()
+            session.open_link()
+            self.assertEqual(
+                spawned,
+                [
+                    ["firefox", "-P", "settings", "https://example.com/a"],
+                    ["firefox", "-P", "settings", "https://example.com/b"],
+                ],
+            )
+            self.assertIn("https://example.com/b", session.notice)
+            session.reader_marks = [ReaderMark()]
+            session.reader_view = ["no address here"]
+            session._link_key = None
+            session.open_link()
+            self.assertEqual(session.notice, "no link")
         finally:
             engine.store.close()
 

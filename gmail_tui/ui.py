@@ -121,6 +121,13 @@ class MailSession:
         self.notice = ""
         self.quitting = False
         self.download_dir = Path.home() / "Downloads"
+        # Links and HTML parts. Attachments stay on xdg-open.
+        self.open_command: tuple[str, ...] = ("xdg-open",)
+        self._link_key: tuple[str, int] | None = None
+        self._link_pick: int | None = None
+        # Last link a click opened, so the matching release does not launch twice.
+        self._mouse_link: tuple[int, int, str] | None = None
+        self._mouse_link_at = 0.0
         self.prompt: str | None = None
         self.prompt_text = ""
         self.prompt_cursor = 0
@@ -1725,16 +1732,59 @@ class MailSession:
             self.notice = "open failed"
             return
         try:
-            self._xdg_open(path)
+            self._open_browser(os.fspath(path))
         except OSError as exc:
             path.unlink(missing_ok=True)
             self.notice = str(exc) or "open failed"
             return
         self.notice = f"opened {path}"
 
+    def terminal_opens_links(self) -> bool:
+        """The default opener matches the terminal, which opens OSC 8 clicks."""
+        return self.open_command == ("xdg-open",)
+
+    def open_link(self) -> None:
+        """Open the next link at or below the reader scroll, then the one after."""
+        targets: list[tuple[int, str]] = []
+        for row, mark in enumerate(self.reader_marks):
+            for _column, url in mark.links:
+                targets.append((row, url))
+        if not targets:
+            self.notice = "no link"
+            return
+        anchor = 0
+        for index, (row, _url) in enumerate(targets):
+            if row >= self.reader_scroll:
+                anchor = index
+                break
+        shown = ""
+        if self.messages:
+            shown = self.messages[self.message_cursor].gmail_id
+        key = (shown, self.reader_scroll)
+        pick = anchor
+        if self._link_key == key and self._link_pick is not None:
+            pick = (self._link_pick + 1) % len(targets)
+        self._link_key = key
+        self._link_pick = pick
+        self.open_url(targets[pick][1])
+
+    def open_url(self, url: str) -> None:
+        try:
+            self._open_browser(url)
+        except OSError as exc:
+            self.notice = str(exc) or "open failed"
+            return
+        self.notice = f"opened {url}"
+
+    def _open_browser(self, target: str) -> None:
+        self._spawn([*self.open_command, target])
+
     def _xdg_open(self, path: Path) -> None:
+        self._spawn(["xdg-open", os.fspath(path)])
+
+    def _spawn(self, argv: list[str]) -> None:
         subprocess.Popen(
-            ["xdg-open", os.fspath(path)],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2813,6 +2863,24 @@ def reader_hyperlinks(
     return writes
 
 
+def link_at(
+    view: list[str],
+    marks: list[ReaderMark],
+    scroll: int,
+    y: int,
+    x: int,
+    *,
+    top: int,
+    pane_left: int,
+    rows: int,
+) -> str | None:
+    """URL when ``(y, x)`` lands on a visible ``link`` word."""
+    for ly, lx, text, url in reader_hyperlinks(view, marks, scroll, top, pane_left, rows, 0):
+        if y == ly and lx <= x < lx + len(text):
+            return url
+    return None
+
+
 def reader_match(session: MailSession, width: int) -> tuple[int, int, str] | None:
     """Wrapped row, display column, and the visible slice of the current find."""
     if session.find_line is None or not session.find_query:
@@ -3485,6 +3553,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("raw-source", "show the raw message source"),
         ("headers", "show all header fields"),
         ("urls", "hide or show link addresses"),
+        ("open-url", "open the next link"),
         ("holding", "mail waiting to be sent"),
         ("undo", "undo the last change"),
         ("quit", "quit"),
@@ -3508,7 +3577,8 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("view-image", "show the selected picture"),
         ("raw-source", "show or hide the raw message source"),
         ("headers", "show all header fields, or only the short set"),
-        ("urls", "hide or show link addresses (the word link still opens them)"),
+        ("urls", "hide or show link addresses"),
+        ("open-url", "open the next link"),
         ("escape", "leave the raw source"),
         ("archive", "archive"),
         ("snooze", "snooze until later"),
@@ -3540,7 +3610,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
     "mime": (
         ("down", "next MIME part"),
         ("up", "previous MIME part"),
-        ("activate", "open HTML in the browser"),
+        ("activate", "open HTML with the open command"),
         ("escape", "back to the message"),
         ("quit", "back to the mail list"),
         ("left", "back to the mail list"),

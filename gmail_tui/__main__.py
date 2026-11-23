@@ -33,6 +33,7 @@ from gmail_tui.settings import (
     load as load_settings,
     resolve_config_path,
     resolve_data_dir,
+    resolve_open_command,
 )
 from gmail_tui.store import MessageNotFound, Store, ThreadCursor
 from gmail_tui import profile
@@ -125,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     profile_name = args.profile if args.profile is not None else os.environ.get("GMAIL_TUI_PROFILE")
     try:
         data = resolve_data_dir(data, profile_name)
+        opener = resolve_open_command(settings, settings_file, profile_name)
     except SettingsError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -133,7 +135,13 @@ def main(argv: list[str] | None = None) -> int:
             profile.start(data / "profile.log")
             profile.attach()
         _setup_oauth_tpm(settings, settings_file, data, args.command)
-        return _run(args, data, download=settings.download, settings_path=settings_file)
+        return _run(
+            args,
+            data,
+            download=settings.download,
+            settings_path=settings_file,
+            open_command=opener,
+        )
     except (GmailError, MessageNotFound, ValueError, OAuthError) as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -181,6 +189,7 @@ def _run(
     *,
     download: Path | None = None,
     settings_path: Path | None = None,
+    open_command: tuple[str, ...] = ("xdg-open",),
 ) -> int:
     if args.command == "login":
         return _login(args, data)
@@ -195,6 +204,7 @@ def _run(
             keys_path=keys,
             download_dir=download,
             settings_path=settings_path,
+            open_command=open_command,
         )
         return 0
     settings = load_settings(settings_path) if settings_path is not None else None

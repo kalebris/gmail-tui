@@ -51,6 +51,7 @@ DEFAULT_BINDINGS: dict[str, tuple[str, ...]] = {
     "raw-source": ("V",),
     "headers": ("F",),
     "urls": ("L",),
+    "open-url": ("O",),
     "undo": ("U",),
     "next-account": ("]",),
     "prev-account": ("[",),

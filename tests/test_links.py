@@ -4,7 +4,7 @@ import unittest
 
 from gmail_tui.links import osc8, present_links, strip_link_urls
 from gmail_tui.store import MessagePreview
-from gmail_tui.ui import _display_width, format_reader, layout_reader, reader_hyperlinks
+from gmail_tui.ui import _display_width, format_reader, layout_reader, link_at, reader_hyperlinks
 
 
 class LinkTextTests(unittest.TestCase):
@@ -74,6 +74,12 @@ class LinkLayoutTests(unittest.TestCase):
         view, _starts, marks = layout_reader([present_links(url)], 30, hide_urls=True)
         self.assertEqual(view, ["link"])
         self.assertEqual(marks[0].links, ((0, url),))
+
+    def test_a_click_on_the_word_link_is_that_url(self) -> None:
+        line = present_links("see https://example.com/a and https://example.org/b now")
+        view, _starts, marks = layout_reader([line], 80)
+        self.assertEqual(link_at(view, marks, 0, 4, 5, top=4, pane_left=1, rows=8), "https://example.com/a")
+        self.assertIsNone(link_at(view, marks, 0, 4, 9, top=4, pane_left=1, rows=8))
 
     def test_reader_shows_the_url_after_link(self) -> None:
         preview = MessagePreview(

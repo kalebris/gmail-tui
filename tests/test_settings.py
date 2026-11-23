@@ -18,8 +18,10 @@ from gmail_tui.settings import (
     load,
     normalize_profile,
     parse,
+    parse_profile_open,
     resolve_config_path,
     resolve_data_dir,
+    resolve_open_command,
     xdg_config_home,
     xdg_data_home,
 )
@@ -76,6 +78,8 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("weekday", text)
         self.assertIn("oauth-tpm", text)
         self.assertIn("on-demand", text)
+        self.assertIn("open", text)
+        self.assertIn("profiles/<name>", text)
 
     def test_on_demand_folders_default_and_override(self) -> None:
         self.assertEqual(parse("").on_demand, DEFAULT_ON_DEMAND)
@@ -100,6 +104,44 @@ class SettingsTests(unittest.TestCase):
         finally:
             apply(parse(""))
             self.assertEqual(store.on_demand_labels(), frozenset(DEFAULT_ON_DEMAND))
+
+    def test_open_command_defaults_to_xdg_open_and_parses_argv(self) -> None:
+        self.assertEqual(parse("").open_command, ("xdg-open",))
+        self.assertEqual(
+            parse("open firefox -P settings\n").open_command,
+            ("firefox", "-P", "settings"),
+        )
+        self.assertEqual(
+            parse('open firefox -P "my settings"\n').open_command,
+            ("firefox", "-P", "my settings"),
+        )
+        with self.assertRaises(SettingsError):
+            parse("open\n")
+        with self.assertRaises(SettingsError):
+            parse('open firefox -P "unterminated\n')
+
+    def test_profile_file_overrides_open_for_that_profile(self) -> None:
+        shared = parse("open xdg-open\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config"
+            config.write_text("open xdg-open\n", encoding="utf-8")
+            self.assertEqual(resolve_open_command(shared, config, None), ("xdg-open",))
+            self.assertEqual(resolve_open_command(shared, config, "work"), ("xdg-open",))
+            profile = root / "profiles" / "work"
+            profile.parent.mkdir()
+            profile.write_text(
+                "# work browser\nopen firefox -P settings\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                resolve_open_command(shared, config, "work"),
+                ("firefox", "-P", "settings"),
+            )
+            self.assertEqual(resolve_open_command(shared, config, "home"), ("xdg-open",))
+            self.assertIsNone(parse_profile_open("# nothing yet\n"))
+            with self.assertRaises(SettingsError):
+                parse_profile_open("download /tmp\n")
 
     def test_profile_nests_under_the_data_directory(self) -> None:
         base = Path("/var/gmail-tui")

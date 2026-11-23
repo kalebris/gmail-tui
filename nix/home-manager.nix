@@ -111,7 +111,9 @@ in
         For each name, installs <command>gmail-tui-&lt;name&gt;</command> on
         <envar>PATH</envar> as a small wrapper around
         <command>gmail-tui --profile &lt;name&gt;</command>. Config and keys stay
-        shared; only the mail index and tokens are separated.
+        shared; only the mail index and tokens are separated. A file
+        <filename>profiles/&lt;name&gt;</filename> next to the config can override
+        the <literal>open</literal> command for that profile.
       '';
     };
 

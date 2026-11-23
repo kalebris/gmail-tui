@@ -33,6 +33,7 @@ from gmail_tui.ui import (
     format_check_age,
     geometry,
     help_lines,
+    link_at,
     mark_spans,
     reader_hyperlinks,
     reader_match,
@@ -235,6 +236,7 @@ def run_tui(
     *,
     download_dir: Path | None = None,
     settings_path=None,
+    open_command: tuple[str, ...] = ("xdg-open",),
 ) -> None:
     locale.setlocale(locale.LC_ALL, "")
     notice = ""
@@ -284,6 +286,7 @@ def run_tui(
             slot.session.sixel = supported
             slot.session.sixel_cell = cell
             slot.session.download_dir = downloads
+            slot.session.open_command = open_command
         images = _SixelPump(desk)
         global _images
         _images = images
@@ -860,6 +863,9 @@ def _loop(
         if action == "urls":
             session.toggle_urls()
             continue
+        if action == "open-url":
+            session.open_link()
+            continue
         if action == "compose":
             if session.external is not None:
                 session.notice = "already writing a message"
@@ -1336,7 +1342,13 @@ def _refresh(screen: curses.window, *, soft: bool = False) -> None:
 
 
 def _emit_hyperlinks(session: MailSession, geo) -> None:
-    """Open the word link in front of a URL. The address itself stays plain text."""
+    """Open the word link in front of a URL. The address itself stays plain text.
+
+    A custom ``open`` command launches that program on click instead, so the
+    terminal's own opener does not also run.
+    """
+    if not session.terminal_opens_links():
+        return
     if session.popup:
         return
     regions = reader_hyperlinks(
@@ -1899,6 +1911,32 @@ def _mouse_click(session: MailSession, screen: curses.window, x: int, y: int) ->
     if y <= geo.top or y == geo.list_h or y >= geo.height - 2:
         return None
     if y > geo.list_h:
+        if (
+            not session.terminal_opens_links()
+            and session.prompt is None
+            and not session.help_open
+            and session.popup is None
+        ):
+            url = link_at(
+                session.reader_view,
+                session.reader_marks,
+                session.reader_scroll,
+                y,
+                x,
+                top=geo.list_h + 1,
+                pane_left=1,
+                rows=geo.reader_rows,
+            )
+            if url:
+                session.focus = "reader"
+                # Press and release are separate events for one click.
+                now = time.monotonic()
+                stamp = (y, x, url)
+                if session._mouse_link != stamp or now - session._mouse_link_at > 0.4:
+                    session._mouse_link = stamp
+                    session._mouse_link_at = now
+                    session.open_url(url)
+                return None
         session.focus = "reader"
         return None
     if x < geo.sidebar_w:

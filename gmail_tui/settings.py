@@ -5,6 +5,9 @@ or whatever ``--config`` / ``GMAIL_TUI_CONFIG`` points at. The mail index defaul
 to ``$XDG_DATA_HOME/gmail-tui/`` (``~/.local/share/gmail-tui/``) so an installed
 ``gmail-tui`` on ``PATH`` does not depend on the current working directory.
 ``download`` is where saved attachments and xdg-open copies go.
+``open`` is the program for a link or an HTML part (the target is appended).
+A ``profiles/<name>`` file beside the config overrides ``open`` for
+``--profile <name>``.
 ``account`` lines, one address each, set the left-to-right order of the top bar.
 ``date`` / ``time`` / ``datetime`` / ``weekday`` are strftime patterns for stamps.
 """
@@ -12,6 +15,7 @@ to ``$XDG_DATA_HOME/gmail-tui/`` (``~/.local/share/gmail-tui/``) so an installed
 from __future__ import annotations
 
 import os
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +44,8 @@ class Settings:
     oauth_tpm_identity: Path | None = None
     # Gmail label ids whose bodies are not background-cached.
     on_demand: tuple[str, ...] = DEFAULT_ON_DEMAND
+    # Program for a link or an HTML part. The URL or file is appended.
+    open_command: tuple[str, ...] = ("xdg-open",)
 
 
 def xdg_config_home() -> Path:
@@ -124,7 +130,8 @@ def default_text(path: Path | None = None) -> str:
         "# download   directory for saved attachments (tab-complete, xdg-open)\n"
         "# data       mail index and body cache when --data is omitted\n"
         "#            gmail-tui --profile NAME uses <data>/NAME/ for that run;\n"
-        "#            keys and this config file stay shared across profiles.\n"
+        "#            keys and this config stay shared; profiles/<name> can\n"
+        "#            override open for that run.\n"
         "# account    one address per line, left to right on the top bar.\n"
         "#            Any mailbox omitted here still appears, after these.\n"
         "# date       strftime for calendar days / all-day stamps (default %Y-%m-%d)\n"
@@ -137,6 +144,11 @@ def default_text(path: Path | None = None) -> str:
         "# on-demand  label whose bodies wait until that folder is open\n"
         "#            (default: TRASH and SPAM). One label per line.\n"
         "#            on-demand none  → background-fetch every folder\n"
+        "# open       program for a link or an HTML part. The URL or file is\n"
+        "#            added at the end. Default: xdg-open\n"
+        "#            profiles/<name> beside this file overrides it for\n"
+        "#            gmail-tui --profile <name>. That file is only an open line.\n"
+        "#            Example: open firefox -P settings\n"
         "#\n"
         f"download {download}\n"
         f"data {data}\n"
@@ -185,6 +197,7 @@ def parse(text: str) -> Settings:
     oauth_tpm = False
     oauth_tpm_identity: Path | None = None
     on_demand: list[str] | None = None
+    open_command = ("xdg-open",)
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -224,6 +237,8 @@ def parse(text: str) -> Settings:
             if any(ch.isspace() for ch in value):
                 raise SettingsError(f"line {lineno}: on-demand takes one label")
             on_demand.append(_on_demand_label(value, lineno))
+        elif name == "open":
+            open_command = _open_command(value, lineno)
         else:
             raise SettingsError(f"line {lineno}: unknown setting {name}")
     if not seen_datetime or datetime_fmt is None:
@@ -239,7 +254,65 @@ def parse(text: str) -> Settings:
         oauth_tpm=oauth_tpm,
         oauth_tpm_identity=oauth_tpm_identity,
         on_demand=tuple(on_demand) if on_demand is not None else DEFAULT_ON_DEMAND,
+        open_command=open_command,
     )
+
+
+def profile_config_path(settings_file: Path, profile: str) -> Path:
+    """``<config-dir>/profiles/<name>`` — optional ``open`` override for one profile."""
+    name = normalize_profile(profile)
+    if not name:
+        raise SettingsError("profile name is empty")
+    return settings_file.parent / "profiles" / name
+
+
+def load_profile_open(path: Path) -> tuple[str, ...] | None:
+    """``open`` command from a profile file. Missing or empty means no override."""
+    if not path.exists():
+        return None
+    return parse_profile_open(path.read_text(encoding="utf-8"))
+
+
+def parse_profile_open(text: str) -> tuple[str, ...] | None:
+    """The ``open`` line in a profile file. Any other setting is an error."""
+    command: tuple[str, ...] | None = None
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            raise SettingsError(f"line {lineno}: expected 'open <command>'")
+        name, value = parts[0], parts[1].strip()
+        if name != "open":
+            raise SettingsError(f"line {lineno}: a profile file only sets open")
+        command = _open_command(value, lineno)
+    return command
+
+
+def resolve_open_command(
+    settings: Settings,
+    settings_file: Path,
+    profile: str | None,
+) -> tuple[str, ...]:
+    """Shared ``open``, unless this profile's file sets one."""
+    name = normalize_profile(profile)
+    if name is None:
+        return settings.open_command
+    overlay = load_profile_open(profile_config_path(settings_file, name))
+    if overlay is None:
+        return settings.open_command
+    return overlay
+
+
+def _open_command(value: str, lineno: int) -> tuple[str, ...]:
+    try:
+        argv = tuple(shlex.split(value, posix=True))
+    except ValueError as exc:
+        raise SettingsError(f"line {lineno}: {exc}") from exc
+    if not argv:
+        raise SettingsError(f"line {lineno}: open needs a command")
+    return argv
 
 
 def _bool(value: str, lineno: int) -> bool:
