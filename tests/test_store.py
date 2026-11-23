@@ -151,6 +151,42 @@ class StoreTests(unittest.TestCase):
         self.assertIn(("m1", "STARRED", "add"), self.store.pending_mutations())
         self.assertIn(("m1", "INBOX", "remove"), self.store.pending_mutations())
 
+    def test_a_batched_push_holds_rows_until_history_catches_up(self) -> None:
+        self.store.set_history_id("500")
+        for index in range(3):
+            self.store.upsert_metadata(
+                _message(f"m{index}", f"t{index}", 1_000 + index, f"mail {index}", ["INBOX"]),
+                "missing",
+            )
+        self.store.apply_local_labels_batch(
+            [(f"m{index}", ["TRASH"], ["INBOX"]) for index in range(3)]
+        )
+        groups = self.store.queue_groups()
+        self.assertEqual(sorted(groups), ["m0", "m1", "m2"])
+        self.store.complete_batch_push(groups)
+        self.assertEqual(self.store.queue_groups(), {})
+        self.assertFalse(self.store.has_pending_mutations())
+        # Held, not lost: the change must outlive a history page that was
+        # written before Gmail applied it.
+        self.assertEqual(len(self.store.held_changes()), 6)
+        self.store.apply_history_page(
+            [],
+            {},
+            start="500",
+            next_page_token=None,
+            finished_history_id="520",
+        )
+        self.assertEqual(self.store.held_changes(), [])
+        for index in range(3):
+            self.assertEqual(self.store.message_label_ids(f"m{index}"), {"TRASH"})
+
+    def test_a_batched_push_without_a_cursor_drops_its_rows(self) -> None:
+        self.store.upsert_metadata(_message("m1", "t1", 1_000, "mail", ["INBOX"]), "missing")
+        self.store.apply_local_labels_batch([("m1", ["TRASH"], ["INBOX"])])
+        self.store.complete_batch_push(self.store.queue_groups())
+        self.assertEqual(self.store.queue_groups(), {})
+        self.assertEqual(self.store.held_changes(), [])
+
     def test_fts_indexes_headers_then_body_and_drops_on_delete(self) -> None:
         self.store.upsert_metadata(_message("m1", "t1", 1000, "Hello there", ["INBOX"]), "missing")
         parsed = parse_query("Hello")

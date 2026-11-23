@@ -203,6 +203,14 @@ class HttpGmail:
             raise
         return parse_message(data)
 
+    def batch_modify(self, message_ids: list[str], add: list[str], remove: list[str]) -> None:
+        body = {
+            "ids": list(message_ids),
+            "addLabelIds": list(add),
+            "removeLabelIds": list(remove),
+        }
+        self._json("POST", "/gmail/v1/users/me/messages/batchModify", body=body)
+
     def send_message(self, raw: bytes, thread_id: str) -> IncomingMessage:
         encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         body: dict[str, Any] = {"raw": encoded}

@@ -143,9 +143,12 @@ class ChangeSpeedTests(unittest.TestCase):
             previews: list[str] = []
             labels: list[str] = []
             reads: list[Path] = []
+            statements: list[str] = []
+            stats: list[str] = []
             original_preview = Store.preview_message
             original_labels = Store.list_label_info
             original_read = Path.read_bytes
+            original_stat = Path.stat
 
             def counting_preview(gmail_id: str):
                 previews.append(gmail_id)
@@ -159,16 +162,27 @@ class ChangeSpeedTests(unittest.TestCase):
                 reads.append(path)
                 return original_read(path)
 
+            def counting_stat(path: Path, **kwargs):
+                stats.append(path.name)
+                return original_stat(path, **kwargs)
+
             engine.store.preview_message = counting_preview  # type: ignore[method-assign]
             engine.store.list_label_info = counting_labels  # type: ignore[method-assign]
             Path.read_bytes = counting_read  # type: ignore[method-assign]
+            Path.stat = counting_stat  # type: ignore[method-assign]
+            engine.store.conn.set_trace_callback(statements.append)
             try:
                 started = time.perf_counter()
                 session.delete_selected()
+                # The status line asks for queue counts on every paint; only
+                # the delete itself is under the statement guard.
+                engine.store.conn.set_trace_callback(None)
                 render_lines(session, 36, 120)
                 elapsed = time.perf_counter() - started
             finally:
+                engine.store.conn.set_trace_callback(None)
                 Path.read_bytes = original_read  # type: ignore[method-assign]
+                Path.stat = original_stat  # type: ignore[method-assign]
                 del engine.store.preview_message
                 del engine.store.list_label_info
             self.assertLess(elapsed, 0.5)
@@ -176,6 +190,10 @@ class ChangeSpeedTests(unittest.TestCase):
             self.assertEqual(labels, [])
             # Opening m3 for the first time reads its body for the MIME list.
             self.assertEqual(len(reads), 1)
+            # One statement and one stat open the row the delete reveals.
+            # Four statements and two stats used to run between key and paint.
+            self.assertLessEqual(len(statements), 1)
+            self.assertEqual(stats, ["m3.eml"])
             self.assertEqual(session.messages[session.message_cursor].gmail_id, "m3")
             self.assertIn("oldest body", "\n".join(session.reader_view))
             self.assertNotIn("newest body", "\n".join(session.reader_view))

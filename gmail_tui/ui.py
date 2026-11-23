@@ -2245,6 +2245,10 @@ class MailSession:
         self._snooze_choices = []
         # Archive out of the inbox; wake_due_snoozes puts INBOX back later.
         self._change_selected(remove=["INBOX"])
+        # Snooze already writes the wake-up time on this key, so land the
+        # leave-view label change with it instead of reporting INBOX forever
+        # while the account thread waits for a turn.
+        self.flush_label_todo()
         hour = until.strftime("%I").lstrip("0") or "12"
         stamp = f"{until.strftime('%a')} {hour}:{until.strftime('%M%p')}"
         count = len(targets)

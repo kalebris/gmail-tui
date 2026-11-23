@@ -15,6 +15,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISREG
 from typing import Iterator
 
 from gmail_tui.gmail import HistoryRecord, IncomingMessage, Label
@@ -1026,28 +1027,28 @@ class Store:
         ]
 
     def preview_message(self, gmail_id: str, *, mime: bool = False) -> MessagePreview | None:
-        row = self.opened_message(gmail_id)
+        row = self._preview_row(gmail_id)
         if row is None:
             return None
-        message_row = self._message_row(gmail_id)
-        names = self._label_names_for([message_row["id"]]) if message_row else {}
-        message_id = message_row["id"] if message_row else 0
-        cached = self.body_readable(gmail_id)
-        attachments: tuple[Attachment, ...] = ()
-        mime_parts: tuple[MimePart, ...] = ()
-        body_text = str(row["body_text"]) if cached else ""
-        has_attachment = bool(message_row["has_attachment"]) if message_row else False
-        label_names = names.get(message_id, ())
+        names = str(row["label_names"] or "")
+        label_names = tuple(sorted(names.split("\x1f"))) if names else ()
+        cached = False
         stamp: tuple[int, int] | None = None
         path: Path | None = None
-        if cached and message_row and message_row["body_path"]:
-            path = self.root / str(message_row["body_path"])
+        if row["body_state"] == "present" and row["body_path"]:
+            candidate = self.root / str(row["body_path"])
             try:
-                stat = path.stat()
-                stamp = (stat.st_mtime_ns, stat.st_size)
+                info = candidate.stat()
             except OSError:
-                stamp = None
-                path = None
+                info = None
+            if info is not None and S_ISREG(info.st_mode):
+                cached = True
+                stamp = (info.st_mtime_ns, info.st_size)
+                path = candidate
+        body_text = str(row["body_text"]) if cached else ""
+        attachments: tuple[Attachment, ...] = ()
+        mime_parts: tuple[MimePart, ...] = ()
+        has_attachment = bool(row["has_attachment"])
         identity = (
             gmail_id,
             stamp,
@@ -1526,6 +1527,41 @@ class Store:
             self._rebuild_thread(row["thread_id"])
         self.label_epoch += 1
 
+    def complete_batch_push(self, items_by_message: dict[str, list[QueueItem]]) -> None:
+        """Record label changes Gmail accepted in one batchModify call.
+
+        A batch response carries no per-message label snapshot, so the local
+        membership set when the intent was queued stays authoritative. Rows
+        are held against the local history cursor until the next history page
+        commits, like the per-message path, so a stale snapshot cannot flip a
+        label back between the push and the next poll.
+        """
+        confirmed = self.history_id() or None
+        with self._tx():
+            threads: set[int] = set()
+            for gmail_id, items in items_by_message.items():
+                row = self._message_row(gmail_id)
+                if row is not None:
+                    threads.add(row["thread_id"])
+                for item in items:
+                    if confirmed:
+                        self.conn.execute(
+                            """
+                            UPDATE mutation_queue
+                            SET confirmed_history_id=?
+                            WHERE id=? AND seq=?
+                            """,
+                            (confirmed, item.id, item.seq),
+                        )
+                    else:
+                        self.conn.execute(
+                            "DELETE FROM mutation_queue WHERE id=? AND seq=?",
+                            (item.id, item.seq),
+                        )
+            for thread_id in threads:
+                self._rebuild_thread(thread_id)
+        self.label_epoch += 1
+
     def save_attachment(self, gmail_id: str, index: int, destination: Path) -> Path:
         """Write one saved attachment to ``destination`` and return that path."""
         row = self._message_row(gmail_id)
@@ -1889,6 +1925,35 @@ class Store:
         if row is None:
             return None
         return _search_hit(row)
+
+    def _preview_row(self, gmail_id: str) -> sqlite3.Row | None:
+        """Everything the reader needs for one message, in one statement.
+
+        Opening a row used to take four statements and stat the body file
+        twice. Label names travel with the row so j/k and the message a
+        delete reveals touch SQLite once.
+        """
+        return self.conn.execute(
+            """
+            SELECT m.gmail_id, m.subject, m.from_addr, m.to_addr, m.cc_addr,
+                   m.snippet, m.internal_date, m.body_state, m.body_path,
+                   m.has_attachment,
+                   COALESCE(mt.body_text, '') AS body_text,
+                   (
+                     SELECT group_concat(l.name, char(31))
+                     FROM (
+                       SELECT l.name AS name
+                       FROM message_labels ml
+                       JOIN labels l ON l.id = ml.label_id
+                       WHERE ml.message_id = m.id AND l.gmail_id != 'UNREAD'
+                     ) l
+                   ) AS label_names
+            FROM messages m
+            LEFT JOIN message_text mt ON mt.message_id = m.id
+            WHERE m.gmail_id = ?
+            """,
+            (gmail_id,),
+        ).fetchone()
 
     def opened_message(self, gmail_id: str) -> dict[str, object] | None:
         row = self.conn.execute(

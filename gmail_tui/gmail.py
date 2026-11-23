@@ -47,6 +47,9 @@ UNITS_GET_RAW = 60
 UNITS_MODIFY = 5
 UNITS_SEND = 100
 UNITS_DRAFT = 10
+# messages.batchModify applies the same label change to many messages in one
+# call, for one flat 50 units, up to 1000 ids per request.
+UNITS_BATCH_MODIFY = 50
 QUOTA_PER_MINUTE = 6000
 BATCH_LIMIT = 100
 
@@ -165,6 +168,9 @@ class GmailClient(Protocol):
     def modify_message(self, message_id: str, add: list[str], remove: list[str]) -> IncomingMessage:
         """Add and remove label ids. This is an intent, not a full label snapshot."""
 
+    def batch_modify(self, message_ids: list[str], add: list[str], remove: list[str]) -> None:
+        """Apply the same add/remove label ids to many messages in one call."""
+
     def create_label(self, name: str) -> Label:
         """Create a user label and return the id Gmail assigned."""
 
@@ -207,6 +213,9 @@ class NullGmail:
         raise Offline("no Gmail token")
 
     def modify_message(self, message_id: str, add: list[str], remove: list[str]) -> IncomingMessage:
+        raise Offline("no Gmail token")
+
+    def batch_modify(self, message_ids: list[str], add: list[str], remove: list[str]) -> None:
         raise Offline("no Gmail token")
 
     def create_label(self, name: str) -> Label:

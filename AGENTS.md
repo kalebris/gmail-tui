@@ -8,6 +8,7 @@ Keypresses must feel instantaneous. Treat **least latency on the UI thread** as 
 - Leave-view actions (delete/archive from Inbox) drop the row in memory first; persist labels on the account thread (`label_todo` / `UrgentWork`).
 - Paint the frame for the key **before** poking background work that may lock the store.
 - Prefer deferring `labels_stale` until after the deferred store write lands.
+- Opening the row a delete reveals costs one store statement plus one body stat (`_preview_row`); do not let `preview_message` fan back out into per-field queries.
 - When speeding one path (e.g. `x`), keep peer paths (`d`/`e`) in the same budget — do not leave them doing extra local work.
 
 Regression guards live in `tests/test_speed.py`. Extend those tests when you change a hot path; a wall-clock bound alone is not enough — also assert which store/IO APIs the key is allowed to touch.
@@ -15,3 +16,7 @@ Regression guards live in `tests/test_speed.py`. Extend those tests when you cha
 ## Background work
 
 Network, history polls, body cache, and mutation push belong on the account thread. The UI records intent and observes results; it must not wait on Gmail for navigation or leave-view label changes.
+
+- Group pending changes that share one add/remove set into a single `batchModify` (`batch_for`), so a marked delete is one round trip instead of one per message.
+- `batchModify` is a flat 50 units; separate `modify` calls are 5 each. Only batch groups of 10+ messages (`_BATCH_MODIFY_MIN`) so a delete never spends more of the minute than the calls it replaces.
+- If Gmail refuses a batch, fall back to `push_each` and remember the refused signature so the flat cost is not paid twice.

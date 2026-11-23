@@ -18,7 +18,9 @@ from gmail_tui.gmail import (
     LabelChange,
     MessageFormat,
     Offline,
+    UNITS_BATCH_MODIFY,
     UNITS_GET,
+    UNITS_MODIFY,
 )
 from gmail_tui.http_gmail import HttpStatus, is_precondition_failed, is_rate_limited
 from gmail_tui.quota import Quota, SyncStopped
@@ -62,6 +64,26 @@ class SyncTests(unittest.TestCase):
             )
         )
         self.engine = Engine.open(self.tmp.name, self.fake, sleeper=lambda _seconds: None)
+
+    def _inbox_batch(self, count: int, prefix: str) -> list[str]:
+        """Add ``count`` inbox messages to both Gmail and the local replica."""
+        record = HistoryRecord(id="0")
+        ids: list[str] = []
+        for index in range(count):
+            gmail_id = f"{prefix}{index}"
+            ids.append(gmail_id)
+            self.fake.add(_inbox(gmail_id, f"{prefix} body {index}", 30_000 + index))
+            record.messages_added.append(
+                HistoryMessage(gmail_id, f"t-{gmail_id}", ["INBOX", "UNREAD"])
+            )
+        self.fake.add_history(record)
+        self.engine.sync_metadata()
+        return ids
+
+    def _delete_locally(self, ids: list[str]) -> None:
+        self.engine.store.apply_local_labels_batch(
+            [(gmail_id, ["TRASH"], ["INBOX"]) for gmail_id in ids]
+        )
 
     def tearDown(self) -> None:
         self.engine.store.close()
@@ -354,6 +376,70 @@ class SyncTests(unittest.TestCase):
             ],
         )
         self.assertEqual(self.engine.store.message_label_ids("in1"), {"INBOX", "EXTRA"})
+        self.assertEqual(self.engine.store.pending_mutations(), [])
+
+    def test_a_marked_delete_reaches_gmail_in_one_batch_call(self) -> None:
+        self.engine.startup()
+        ids = self._inbox_batch(12, "big")
+        self._delete_locally(ids)
+        self.fake.calls.clear()
+        before = self.engine.quota.units
+        pushed, rebased = self.engine.flush_queue()
+        self.assertEqual((pushed, rebased), (len(ids), 0))
+        # One flat batch cost, not twelve 5-unit modifies: 50 units well spent
+        # against the per-minute budget, in one round trip instead of twelve.
+        self.assertEqual(self.engine.quota.units - before, UNITS_BATCH_MODIFY)
+        self.assertEqual(
+            [call for call in self.fake.calls if "odify" in call],
+            [f"messages.batchModify:{','.join(ids)}:add=TRASH:remove=INBOX"],
+        )
+        for gmail_id in ids:
+            labels = self.engine.store.message_label_ids(gmail_id)
+            self.assertIn("TRASH", labels)
+            self.assertNotIn("INBOX", labels)
+        self.assertEqual(self.engine.store.queue_groups(), {})
+
+    def test_a_batch_waits_for_history_before_its_rows_are_dropped(self) -> None:
+        # A stale history page still holds the old labels. Keeping the sent
+        # change on file until history passes it is what stops a label from
+        # flipping back locally between the push and the next poll.
+        self.engine.startup()
+        ids = self._inbox_batch(12, "held")
+        self._delete_locally(ids)
+        self.engine.flush_queue()
+        self.assertFalse(self.engine.store.has_pending_mutations())
+        self.assertEqual(len(self.engine.store.held_changes()), len(ids) * 2)
+        self.engine.store.apply_history_page(
+            [], {}, start=self.engine.store.history_id() or "", next_page_token=None,
+            finished_history_id="999999",
+        )
+        self.assertEqual(self.engine.store.held_changes(), [])
+
+    def test_a_small_delete_keeps_the_cheaper_per_message_calls(self) -> None:
+        self.engine.startup()
+        ids = self._inbox_batch(9, "small")
+        self._delete_locally(ids)
+        self.fake.calls.clear()
+        before = self.engine.quota.units
+        pushed, _rebased = self.engine.flush_queue()
+        self.assertEqual(pushed, len(ids))
+        # Nine modifies cost 45 units; a batch would have cost 50.
+        self.assertEqual(self.engine.quota.units - before, UNITS_MODIFY * len(ids))
+        self.assertFalse([call for call in self.fake.calls if "batchModify" in call])
+        self.assertEqual(len([call for call in self.fake.calls if "odify" in call]), len(ids))
+
+    def test_one_missing_id_does_not_strand_the_rest_of_the_batch(self) -> None:
+        self.engine.startup()
+        ids = self._inbox_batch(12, "gone")
+        self._delete_locally(ids)
+        del self.fake.messages[ids[3]]
+        self.fake.calls.clear()
+        pushed, _rebased = self.engine.flush_queue()
+        self.assertEqual(pushed, len(ids) - 1)
+        self.assertTrue([call for call in self.fake.calls if "batchModify:missing" in call])
+        self.assertFalse(self.engine.store.has_metadata(ids[3]))
+        for gmail_id in ids[:3] + ids[4:]:
+            self.assertIn("TRASH", self.engine.store.message_label_ids(gmail_id))
         self.assertEqual(self.engine.store.pending_mutations(), [])
 
     def test_history_add_downloads_body_before_backfill(self) -> None:
@@ -905,6 +991,28 @@ class SyncTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 0.2)
         self.assertFalse(any(call.startswith("messages.modify") for call in self.fake.calls))
         self.assertTrue(self.engine.store.has_pending_mutations())
+
+    def test_a_marked_selection_pushes_as_one_batch(self) -> None:
+        self.engine.startup()
+        ids = self._inbox_batch(12, "sel")
+        session = MailSession(self.engine)
+        session.focus = "list"
+        session.selected.update(ids)
+        session.delete_selected()
+        self.assertTrue(session.label_todo)
+        self.assertFalse(any(call.startswith("messages.modify") for call in self.fake.calls))
+        urgent = UrgentWork(self.engine)
+        self.assertTrue(urgent.step(session))
+        self.assertEqual(session.label_todo, [])
+        self.assertTrue(self.engine.store.has_pending_mutations())
+        self.assertTrue(urgent.step(session))
+        self.assertEqual(
+            len([call for call in self.fake.calls if call.startswith("messages.batchModify")]),
+            1,
+        )
+        self.assertFalse(any(call.startswith("messages.modify") for call in self.fake.calls))
+        self.assertFalse(self.engine.store.has_pending_mutations())
+        self.assertFalse(session.needs_fetch)
 
     def test_sync_restart_shows_signing_in_before_gmail(self) -> None:
         self.engine.startup()

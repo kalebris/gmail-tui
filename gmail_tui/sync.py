@@ -14,7 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from gmail_tui.gmail import (
+    BATCH_LIMIT,
     QUOTA_PER_MINUTE,
+    UNITS_BATCH_MODIFY,
     UNITS_GET,
     UNITS_GET_RAW,
     UNITS_HISTORY,
@@ -65,6 +67,10 @@ _INBOX_BODY_CHUNK = 10
 # (~half the budget) clears a small burst of new mail; later steps stay at 10.
 _INBOX_BODY_BURST = 50  # 3000 units / 60
 _INBOX_BURST_WHEN = 5000.0
+# One batchModify costs 50 units whatever the message count, while separate
+# modifies cost 5 each. Below ten messages the batch would spend more of the
+# minute than the calls it replaces, so only batch when it cannot cost more.
+_BATCH_MODIFY_MIN = UNITS_BATCH_MODIFY // UNITS_MODIFY
 
 
 @dataclass
@@ -98,6 +104,41 @@ class OpenedMessage:
     label_ids: tuple[str, ...]
     body_text: str
     body_cached: bool
+
+
+@dataclass(frozen=True)
+class PushBatch:
+    """Messages that share one label change, for a single batchModify call."""
+
+    add: tuple[str, ...]
+    remove: tuple[str, ...]
+    items: dict[str, list[QueueItem]]
+
+
+def batch_for(
+    groups: dict[str, list[QueueItem]],
+    refused: frozenset[tuple[tuple[str, ...], tuple[str, ...]]] = frozenset(),
+) -> PushBatch | None:
+    """The oldest group of messages one batchModify can take.
+
+    ``batchModify`` applies the *same* label change to every id, so only
+    messages with an identical add/remove set can share a call. Callers keep
+    the per-message path for anything smaller than ``_BATCH_MODIFY_MIN``, and
+    pass ``refused`` so a change Gmail already rejected is not retried.
+    """
+    signatures: dict[tuple[tuple[str, ...], tuple[str, ...]], list[str]] = {}
+    for gmail_id, items in groups.items():
+        add = tuple(sorted(item.label for item in items if item.op == "add"))
+        remove = tuple(sorted(item.label for item in items if item.op == "remove"))
+        if not add and not remove:
+            continue
+        signatures.setdefault((add, remove), []).append(gmail_id)
+    for (add, remove), ids in signatures.items():
+        if len(ids) < _BATCH_MODIFY_MIN or (add, remove) in refused:
+            continue
+        chosen = ids[:BATCH_LIMIT]
+        return PushBatch(add, remove, {gmail_id: groups[gmail_id] for gmail_id in chosen})
+    return None
 
 
 @dataclass
@@ -201,14 +242,64 @@ class Engine:
     def flush_queue(self) -> tuple[int, int]:
         pushed = 0
         rebased = 0
-        for gmail_id, items in self.store.queue_groups().items():
-            items, did_rebase, remote = self._push_one(gmail_id, items)
+        groups = self.store.queue_groups()
+        can_batch = True
+        while groups:
+            batch = batch_for(groups) if can_batch else None
+            if batch is not None:
+                before = len(groups)
+                if self.push_batch(batch):
+                    pushed += len(batch.items)
+                    groups = self.store.queue_groups()
+                    if len(groups) < before:
+                        continue
+                # Gmail refused the change, or the queue did not shrink: stop
+                # batching this flush so a bad id is not paid for again, and
+                # send each message one at a time.
+                can_batch = False
+            pending = groups
+            groups = {}
+            for gmail_id, items in pending.items():
+                items, did_rebase, remote = self._push_one(gmail_id, items)
+                if remote is None:
+                    continue
+                self.store.complete_push(gmail_id, items, remote.label_ids, remote.history_id)
+                pushed += 1
+                rebased += int(did_rebase)
+        return pushed, rebased
+
+    def push_batch(self, batch: PushBatch) -> bool:
+        """Send one label change to many messages in a single Gmail call.
+
+        Returns False when Gmail refused it; the caller then falls back to
+        ``_push_one`` per message. That keeps one unknown or vanished id from
+        stranding every other delete in the batch.
+        """
+        add = [self._materialize_label(label) for label in batch.add]
+        remove = [self._materialize_label(label) for label in batch.remove]
+        ids = list(batch.items)
+        try:
+            self._call(
+                UNITS_BATCH_MODIFY,
+                lambda: self.gmail.batch_modify(ids, add, remove),
+            )
+        except Offline:
+            raise
+        except GmailError:
+            return False
+        self.store.complete_batch_push(batch.items)
+        return True
+
+    def push_each(self, items_by_message: dict[str, list[QueueItem]]) -> int:
+        """One Gmail call per message, for batches Gmail would not take."""
+        pushed = 0
+        for gmail_id, items in items_by_message.items():
+            items, _rebased, remote = self._push_one(gmail_id, items)
             if remote is None:
                 continue
             self.store.complete_push(gmail_id, items, remote.label_ids, remote.history_id)
             pushed += 1
-            rebased += int(did_rebase)
-        return pushed, rebased
+        return pushed
 
     def backfill(self) -> int:
         count = 0
@@ -634,6 +725,9 @@ class UrgentWork:
         self._inflight: tuple | None = None
         self._running = False
         self._ready: list[tuple] = []
+        # Label changes Gmail refused as a batch; the next turn sends them one
+        # message at a time instead of paying the flat cost again.
+        self._refused: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
 
     def has_work(self, session) -> bool:
         if getattr(session, "label_todo", None):
@@ -669,8 +763,16 @@ class UrgentWork:
                 return True
             groups = self.engine.store.queue_groups()
             if not groups:
+                self._refused.clear()
                 self.phase = ""
                 return False
+            batch = batch_for(groups, frozenset(self._refused))
+            if batch is not None:
+                # One call for the whole same-change group: deleting a
+                # selection no longer waits on one round trip per message.
+                self._inflight = ("batch", batch)
+                self.phase = "sending to Gmail"
+                return True
             gmail_id, items = next(iter(groups.items()))
             self._inflight = ("push", gmail_id, items)
             self.phase = "sending to Gmail"
@@ -708,6 +810,19 @@ class UrgentWork:
                     ready = ("error", str(exc), job)
                 else:
                     ready = ("open", job[1])
+            elif job[0] == "batch":
+                batch = job[1]
+                try:
+                    if not self.engine.push_batch(batch):
+                        self._refused.add((batch.add, batch.remove))
+                        self.engine.push_each(batch.items)
+                except Offline as exc:
+                    ready = ("offline", str(exc), job)
+                except GmailError as exc:
+                    ready = ("error", str(exc), job)
+                else:
+                    self.dirty = True
+                    ready = ("push", "batch")
             else:
                 gmail_id, items = job[1], job[2]
                 try:

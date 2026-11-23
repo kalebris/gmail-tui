@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import unittest
@@ -23,6 +24,13 @@ class _KeepAlive(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self) -> None:
+        self.server.ports.append(self.client_address[1])
+        length = int(self.headers.get("Content-Length") or 0)
+        self.server.posts.append((self.path, self.rfile.read(length)))
+        self.send_response(204)
+        self.end_headers()
+
     def log_message(self, _format: str, *_args: object) -> None:
         return
 
@@ -31,6 +39,7 @@ class ConnectionReuseTests(unittest.TestCase):
     def setUp(self) -> None:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _KeepAlive)
         self.server.ports = []
+        self.server.posts = []
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         host, port = self.server.server_address
@@ -47,6 +56,24 @@ class ConnectionReuseTests(unittest.TestCase):
         self.client._json("GET", "/gmail/v1/users/me/profile")
         self.assertEqual(self.server.ports[0], self.server.ports[1])
         self.assertEqual(len(self.client._connections), 1)
+
+    def test_batch_modify_sends_every_id_in_one_request(self) -> None:
+        self.client.batch_modify(["m1", "m2", "m3"], ["TRASH"], ["INBOX"])
+        self.assertEqual(len(self.server.posts), 1)
+        path, body = self.server.posts[0]
+        self.assertEqual(path, "/gmail/v1/users/me/messages/batchModify")
+        self.assertEqual(
+            json.loads(body),
+            {"ids": ["m1", "m2", "m3"], "addLabelIds": ["TRASH"], "removeLabelIds": ["INBOX"]},
+        )
+
+    def test_a_batch_and_a_read_share_one_connection(self) -> None:
+        # One delete of many rows is one TCP round trip, and the next poll
+        # reuses the same socket.
+        self.client.batch_modify(["m1", "m2"], ["TRASH"], ["INBOX"])
+        self.client._json("GET", "/gmail/v1/users/me/profile")
+        self.assertEqual(len(self.server.ports), 2)
+        self.assertEqual(self.server.ports[0], self.server.ports[1])
 
     def test_a_dead_connection_is_opened_again(self) -> None:
         self.client._json("GET", "/gmail/v1/users/me/profile")

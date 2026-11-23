@@ -238,6 +238,38 @@ class FakeGmail:
             message.history_id = record.id
         return self._incoming(message)
 
+    def batch_modify(self, message_ids: list[str], add: list[str], remove: list[str]) -> None:
+        if self.modify_offline:
+            self.calls.append(f"messages.batchModify:{','.join(message_ids)}:offline")
+            raise Offline("offline")
+        missing = [message_id for message_id in message_ids if message_id not in self.messages]
+        if missing:
+            self.calls.append(f"messages.batchModify:missing={','.join(missing)}")
+            raise NotFound(missing[0])
+        added: list[LabelChange] = []
+        removed: list[LabelChange] = []
+        for message_id in message_ids:
+            message = self.messages[message_id]
+            message.label_ids = [label for label in message.label_ids if label not in remove]
+            for label in add:
+                if label not in message.label_ids:
+                    message.label_ids.append(label)
+            change = HistoryMessage(message.id, message.thread_id, list(message.label_ids))
+            if add:
+                added.append(LabelChange(change, list(add)))
+            if remove:
+                removed.append(LabelChange(change, list(remove)))
+        self.calls.append(
+            "messages.batchModify:"
+            f"{','.join(message_ids)}:add={','.join(add)}:remove={','.join(remove)}"
+        )
+        if add or remove:
+            record = self.add_history(
+                HistoryRecord(id="0", labels_added=added, labels_removed=removed)
+            )
+            for message_id in message_ids:
+                self.messages[message_id].history_id = record.id
+
     def send_message(self, raw: bytes, thread_id: str) -> IncomingMessage:
         self.sent.append(raw)
         return self._outgoing(raw, thread_id, f"sent-{len(self.sent)}", ["SENT"], f"messages.send:{thread_id}")
