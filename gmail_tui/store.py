@@ -328,8 +328,24 @@ class Store:
         return self._state()["open_label"]
 
     def set_open_label(self, label: str) -> None:
-        with self._tx():
-            self.conn.execute("UPDATE sync_state SET open_label=? WHERE id=1", (label,))
+        """Remember the open folder.
+
+        Reloading the list calls this on the UI thread. Skip the write when
+        the folder is unchanged, and give up quickly if a sync still holds
+        the database. The next reload tries again. A lock must not exit the UI.
+        """
+        if self.open_label() == label:
+            return
+        conn = self.conn
+        conn.execute("PRAGMA busy_timeout=200")
+        try:
+            with self._tx():
+                conn.execute("UPDATE sync_state SET open_label=? WHERE id=1", (label,))
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+        finally:
+            conn.execute("PRAGMA busy_timeout=5000")
 
     def history_id(self) -> str | None:
         return self._state()["history_id"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import threading
 import time
@@ -92,6 +93,21 @@ class StoreTests(unittest.TestCase):
         self.store.upsert_metadata(_message("new", "t2", 9_000, "new archive", ["Label_1"]), "missing")
         self.assertEqual(self.store.missing_body_ids(1), ["old"])
         self.assertEqual(self.store.missing_body_ids(2), ["old", "new"])
+
+    def test_a_locked_store_does_not_fail_the_open_folder_write(self) -> None:
+        other = sqlite3.connect(Path(self.tmp.name) / "index.sqlite")
+        other.execute("BEGIN IMMEDIATE")
+        try:
+            started = time.monotonic()
+            self.store.set_open_label("INBOX")
+            self.assertLess(time.monotonic() - started, 0.1)
+            self.store.set_open_label("Label_9")
+            self.assertEqual(self.store.open_label(), "INBOX")
+        finally:
+            other.execute("ROLLBACK")
+            other.close()
+        self.store.set_open_label("Label_9")
+        self.assertEqual(self.store.open_label(), "Label_9")
 
     def test_open_folder_outranks_inbox_then_the_rest(self) -> None:
         self.store.replace_labels(
