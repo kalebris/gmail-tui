@@ -1457,9 +1457,12 @@ class BackgroundSync:
                     if _wants_body_now(message, label, store.open_label())
                     else "missing"
                 )
-                store.stage_message(message, schedule)
+                # Inbox rows show up as they arrive. The rest of the mailbox
+                # is written with the page, and does not rebuild the open list.
+                if label is not None:
+                    store.stage_message(message, schedule)
+                    self.dirty = True
                 self._list_batch.append((message, schedule))
-                self.dirty = True
             return True
         if store.label_epoch != self._list_epoch:
             self._reset_list()
@@ -1467,7 +1470,8 @@ class BackgroundSync:
         store.commit_metadata_page(self._list_batch, self._list_next)
         store.note_listed(len(self._list_items))
         self.report.metadata_upserted += len(self._list_batch)
-        self.dirty = True
+        if label is not None:
+            self.dirty = True
         more = self._list_next is not None
         self._reset_list()
         return more

@@ -260,6 +260,25 @@ class SyncTests(unittest.TestCase):
         self.assertNotIn("listing Inbox 2/2", phases)
         self.assertFalse(any(phase.startswith("listing Inbox 1") and phase.endswith("/101") for phase in phases))
 
+    def test_all_mail_listing_leaves_the_open_list_alone(self) -> None:
+        self.fake.reported_messages_total = 40
+        job = BackgroundSync(self.engine)
+        armed = False
+        seen = False
+        for _ in range(400):
+            if not job.step():
+                break
+            if not job.phase.startswith("listing all mail"):
+                continue
+            seen = True
+            if not armed:
+                job.dirty = False
+                armed = True
+                continue
+            self.assertFalse(job.dirty)
+        self.assertTrue(seen)
+        self.assertTrue(self.engine.store.has_metadata("ar1"))
+
     def test_all_mail_progress_is_the_whole_account(self) -> None:
         self.fake.reported_messages_total = 40
         job = BackgroundSync(self.engine)
