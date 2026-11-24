@@ -8,6 +8,7 @@ fetches new messages ahead of the cache.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from dataclasses import dataclass, field
@@ -338,11 +339,26 @@ class Engine:
         return _opened(self.store.opened_message(gmail_id))
 
     def send_reply(self, raw: bytes, thread_id: str) -> str:
-        sent = self._call(UNITS_SEND, lambda: self.gmail.send_message(raw, thread_id))
+        # messages.send is not idempotent. Refresh first, record the bytes,
+        # then post exactly once. A quota, timeout, or 5xx can mean Gmail
+        # already stored the copy.
+        self.refresh_auth()
+        fingerprint = hashlib.sha256(raw).hexdigest()
+
+        def _post() -> IncomingMessage:
+            if not self.store.remember_sent(fingerprint):
+                raise GmailError("already sent")
+            return self.gmail.send_message(raw, thread_id)
+
+        sent = self._call(UNITS_SEND, _post, repeat=False)
         return self._store_outgoing(sent, raw, thread_id, ["SENT"])
 
     def save_draft(self, raw: bytes, thread_id: str) -> str:
-        saved = self._call(UNITS_DRAFT, lambda: self.gmail.create_draft(raw, thread_id))
+        saved = self._call(
+            UNITS_DRAFT,
+            lambda: self.gmail.create_draft(raw, thread_id),
+            repeat=False,
+        )
         return self._store_outgoing(saved, raw, thread_id, ["DRAFT"])
 
     def _store_outgoing(
@@ -665,7 +681,10 @@ class Engine:
         except OAuthError as exc:
             raise Offline(str(exc)) from exc
 
-    def _call(self, cost: int, fn):
+    def _call(self, cost: int, fn, *, repeat: bool = True):
+        if not repeat:
+            self.quota.acquire(cost)
+            return fn()
         attempts = 0
         offline_attempts = 0
         refreshed = False

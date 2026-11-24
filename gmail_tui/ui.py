@@ -140,7 +140,7 @@ class MailSession:
         self.compose_reply_to = ""
         self._sending = False
         # Bodies already handed to Gmail (or ambiguously interrupted mid-send).
-        self._sent_fingerprints: set[str] = set()
+        self._sent_fingerprints = self.engine.store.sent_fingerprints()
         self.external: _ExternalEdit | None = None
         self.mark_start: tuple[int, int] | None = None
         self.mark_end: tuple[int, int] | None = None
@@ -1967,21 +1967,18 @@ class MailSession:
         self._sent_fingerprints.add(fingerprint)
         try:
             self.engine.send_reply(raw, self.compose_thread)
-        except Offline as exc:
-            self.notice = (
-                f"{exc or 'offline'} — check Sent before trying again"
-            )
-            self._clear_compose_fields()
-            self.load_reader(fetch=False)
-            return
         except GmailError as exc:
-            # Definite rejection: allow a corrected retry of the same draft.
-            self._sent_fingerprints.discard(fingerprint)
-            self._sending = False
-            self.prompt = "send"
-            self.notice = str(exc) or "send failed"
+            # Any answer, including a hard 400, can arrive after Gmail stored
+            # the copy. The fingerprint stays, so this draft is not posted again.
+            self._send_uncertain(exc or "send failed")
             return
         self.notice = "sent"
+        self._clear_compose_fields()
+        self.load_reader(fetch=False)
+
+    def _send_uncertain(self, reason: object) -> None:
+        """The POST may have reached Gmail. Do not offer the same draft again."""
+        self.notice = f"{reason} — check Sent before trying again"
         self._clear_compose_fields()
         self.load_reader(fetch=False)
 

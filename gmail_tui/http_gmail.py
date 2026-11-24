@@ -216,7 +216,8 @@ class HttpGmail:
         body: dict[str, Any] = {"raw": encoded}
         if thread_id:
             body["threadId"] = thread_id
-        data = self._json("POST", "/gmail/v1/users/me/messages/send", body=body)
+        # replay=False: a lost response must not post the same message again.
+        data = self._json("POST", "/gmail/v1/users/me/messages/send", body=body, replay=False)
         return parse_message(data)
 
     def create_draft(self, raw: bytes, thread_id: str) -> IncomingMessage:
@@ -254,6 +255,8 @@ class HttpGmail:
         path: str,
         query: list[tuple[str, str]] | None = None,
         body: dict[str, Any] | None = None,
+        *,
+        replay: bool = True,
     ) -> dict[str, Any]:
         url = self.base + path
         if query:
@@ -267,7 +270,7 @@ class HttpGmail:
         if body is not None:
             payload = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
-        status, _content_type, raw = self._request(method, url, headers, payload)
+        status, _content_type, raw = self._request(method, url, headers, payload, replay=replay)
         if status >= 400:
             detail = raw.decode("utf-8", errors="replace")
             if is_rate_limited(status, detail):
@@ -293,6 +296,8 @@ class HttpGmail:
         url: str,
         headers: dict[str, str],
         payload: bytes | None,
+        *,
+        replay: bool = True,
     ) -> tuple[int, str, bytes]:
         current = url
         current_method = method
@@ -300,10 +305,13 @@ class HttpGmail:
         current_headers = headers
         for _redirect in range(4):
             status, content_type, raw, location = self._exchange(
-                current_method, current, current_headers, current_payload
+                current_method, current, current_headers, current_payload, replay=replay
             )
             if status not in (301, 302, 303, 307, 308) or not location:
                 return status, content_type, raw
+            if not replay:
+                # Following this would post the message body a second time.
+                raise GmailError("Gmail redirected a send")
             nxt = urllib.parse.urljoin(current, location)
             if urllib.parse.urlsplit(nxt).hostname != urllib.parse.urlsplit(current).hostname:
                 raise GmailError("Gmail redirected to another host")
@@ -324,6 +332,8 @@ class HttpGmail:
         url: str,
         headers: dict[str, str],
         payload: bytes | None,
+        *,
+        replay: bool = True,
     ) -> tuple[int, str, bytes, str]:
         if self._aborted:
             raise Offline("stopped")
@@ -344,7 +354,9 @@ class HttpGmail:
                 closing = response.will_close
             except (TimeoutError, OSError, http.client.HTTPException) as exc:
                 self._drop(key)
-                if reused and attempt == 1:
+                # A stale keep-alive socket can fail before the bytes are written.
+                # A send does not take that second try: the first post may have landed.
+                if replay and reused and attempt == 1:
                     continue
                 raise Offline(str(exc)) from exc
             if closing:

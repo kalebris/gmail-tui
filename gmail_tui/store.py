@@ -223,8 +223,8 @@ class Store:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version == 0:
             conn.executescript(_SCHEMA)
-            conn.execute("PRAGMA user_version=8")
-        elif version < 8:
+            conn.execute("PRAGMA user_version=9")
+        elif version < 9:
             if version < 2:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
                 if "has_attachment" not in columns:
@@ -279,7 +279,14 @@ class Store:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS snoozed_until ON snoozed(until_ms)"
                 )
-            conn.execute("PRAGMA user_version=8")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sent_mail (
+                  fingerprint TEXT PRIMARY KEY
+                )
+                """
+            )
+            conn.execute("PRAGMA user_version=9")
         store = cls(path, conn)
         store.replay_pending()
         return store
@@ -517,6 +524,26 @@ class Store:
                 """,
                 (email or current, history_id, messages_total),
             )
+
+    def remember_sent(self, fingerprint: str) -> bool:
+        """Claim these bytes for one messages.send. False if already claimed."""
+        with self._tx():
+            cursor = self.conn.execute(
+                "INSERT OR IGNORE INTO sent_mail (fingerprint) VALUES (?)",
+                (fingerprint,),
+            )
+            return cursor.rowcount == 1
+
+    def sent_before(self, fingerprint: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM sent_mail WHERE fingerprint=?",
+            (fingerprint,),
+        ).fetchone()
+        return row is not None
+
+    def sent_fingerprints(self) -> set[str]:
+        rows = self.conn.execute("SELECT fingerprint FROM sent_mail").fetchall()
+        return {str(row[0]) for row in rows}
 
     def account_email(self) -> str:
         return str(self._state()["email"] or "")

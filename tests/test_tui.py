@@ -17,7 +17,7 @@ from pathlib import Path
 
 from gmail_tui.accounts import Account
 from gmail_tui.fake import FakeGmail
-from gmail_tui.gmail import IncomingMessage, Label, NullGmail
+from gmail_tui.gmail import GmailError, IncomingMessage, Label, NullGmail, RateLimited
 from gmail_tui.labels import build_label_tree, flatten
 from gmail_tui.store import MessageCursor, Store
 from gmail_tui.sync import BackgroundSync, Engine
@@ -565,6 +565,10 @@ class MailboxTests(unittest.TestCase):
             self.assertIsNone(edited)
             session.finish_editor(draft, edited, status)
             self.assertEqual(session.notice, "editor failed")
+            # That offline confirm already claimed these bytes. The online
+            # half below is a first send, so drop the claim.
+            engine.store.conn.execute("DELETE FROM sent_mail")
+            engine.store.conn.commit()
         finally:
             engine.store.close()
 
@@ -709,6 +713,78 @@ class MailboxTests(unittest.TestCase):
             self.assertTrue(session._sending)
             session.finish_editor("", filled, 0)
             session.confirm_send()
+            self.assertIn("already sent", session.notice)
+        finally:
+            engine.store.close()
+
+    def test_rate_limited_send_is_not_offered_again(self) -> None:
+        gmail = FakeGmail()
+        engine = Engine.open(self.tmp.name, gmail)
+        try:
+            def limited(raw: bytes, thread_id: str):
+                gmail.sent.append(raw)
+                raise RateLimited("rateLimitExceeded")
+
+            gmail.send_message = limited  # type: ignore[method-assign]
+            session = MailSession(engine)
+            session.begin_compose()
+            filled = (
+                "To: ada@example.com\n"
+                "Cc: \n"
+                "Subject: Hello\n"
+                "\n"
+                "Hi there\n"
+            )
+            session.finish_editor("", filled, 0)
+            session.confirm_send()
+            self.assertEqual(len(gmail.sent), 1)
+            self.assertIsNone(session.prompt)
+            self.assertIn("check Sent", session.notice)
+            session.finish_editor("", filled, 0)
+            session.confirm_send()
+            self.assertEqual(len(gmail.sent), 1)
+            self.assertIn("already sent", session.notice)
+            # A new process loads the same record and must not post it again.
+            again = Engine.open(self.tmp.name, FakeGmail())
+            try:
+                restarted = MailSession(again)
+                restarted.begin_compose()
+                restarted.finish_editor("", filled, 0)
+                restarted.confirm_send()
+                self.assertEqual(len(again.gmail.sent), 0)
+                self.assertIn("already sent", restarted.notice)
+            finally:
+                again.store.close()
+        finally:
+            engine.store.close()
+
+    def test_a_rejected_send_is_not_offered_again(self) -> None:
+        gmail = FakeGmail()
+        engine = Engine.open(self.tmp.name, gmail)
+
+        def rejected(raw: bytes, thread_id: str):
+            gmail.sent.append(raw)
+            raise GmailError("Gmail HTTP 500")
+
+        gmail.send_message = rejected  # type: ignore[method-assign]
+        try:
+            session = MailSession(engine)
+            session.begin_compose()
+            filled = (
+                "To: ada@example.com\n"
+                "Cc: \n"
+                "Subject: Hello\n"
+                "\n"
+                "Hi there\n"
+            )
+            session.finish_editor("", filled, 0)
+            session.confirm_send()
+            self.assertEqual(len(gmail.sent), 1)
+            self.assertIsNone(session.prompt)
+            self.assertIn("check Sent", session.notice)
+            session.finish_editor("", filled, 0)
+            session.confirm_send()
+            self.assertEqual(len(gmail.sent), 1)
             self.assertIn("already sent", session.notice)
         finally:
             engine.store.close()

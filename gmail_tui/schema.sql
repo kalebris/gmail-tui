@@ -106,6 +106,11 @@ CREATE TABLE snoozed (
 
 CREATE INDEX snoozed_until ON snoozed(until_ms);
 
+-- Bytes already handed to messages.send. A later confirm must not post them again.
+CREATE TABLE sent_mail (
+  fingerprint TEXT PRIMARY KEY
+);
+
 CREATE TABLE message_text (
   message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
   subject TEXT NOT NULL DEFAULT '',

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import threading
 import time
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 
 from gmail_tui.fake import FakeGmail, FakeMessage, added, label_change
 from gmail_tui.gmail import (
+    GmailError,
     HistoryMessage,
     HistoryRecord,
     IncomingMessage,
@@ -18,6 +20,7 @@ from gmail_tui.gmail import (
     LabelChange,
     MessageFormat,
     Offline,
+    RateLimited,
     UNITS_BATCH_MODIFY,
     UNITS_GET,
     UNITS_MODIFY,
@@ -1196,6 +1199,42 @@ class SyncTests(unittest.TestCase):
         self.assertFalse(job.step())
         self.assertIsNone(job.exc)
         self.assertEqual(job.mode, "labels")
+
+    def test_a_rate_limited_send_is_posted_once(self) -> None:
+        calls: list[bytes] = []
+        original = self.engine.gmail.send_message
+
+        def limited(raw: bytes, thread_id: str):
+            calls.append(raw)
+            raise RateLimited("rateLimitExceeded")
+
+        self.engine.gmail.send_message = limited  # type: ignore[method-assign]
+        with self.assertRaises(RateLimited):
+            self.engine.send_reply(b"From: me\r\n\r\nHi\r\n", "")
+        self.assertEqual(len(calls), 1)
+        self.engine.gmail.send_message = original  # type: ignore[method-assign]
+        self.assertTrue(
+            self.engine.store.sent_before(hashlib.sha256(b"From: me\r\n\r\nHi\r\n").hexdigest())
+        )
+
+    def test_an_unauthorized_send_is_posted_once(self) -> None:
+        calls: list[bytes] = []
+
+        def unauthorized(raw: bytes, thread_id: str):
+            calls.append(raw)
+            raise HttpStatus(401, "invalid token")
+
+        self.engine.gmail.send_message = unauthorized  # type: ignore[method-assign]
+        with self.assertRaises(HttpStatus):
+            self.engine.send_reply(b"From: me\r\n\r\nHi\r\n", "")
+        self.assertEqual(len(calls), 1)
+
+    def test_the_same_bytes_are_sent_once(self) -> None:
+        raw = b"From: me\r\n\r\nHi\r\n"
+        self.engine.send_reply(raw, "")
+        with self.assertRaises(GmailError):
+            self.engine.send_reply(raw, "")
+        self.assertEqual(len(self.engine.gmail.sent), 1)
 
     def test_rate_limit_is_retried(self) -> None:
         self.fake.profile_rate_limits = 1

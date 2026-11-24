@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import time
 import unittest
@@ -100,6 +101,33 @@ class ConnectionReuseTests(unittest.TestCase):
         self.assertEqual(client.token, "next-token")
 
 
+class _DropSend(BaseHTTPRequestHandler):
+    """Accept one send, then drop the socket before a response."""
+
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:
+        body = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        self.server.posts += 1
+        self.close_connection = True
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            return
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
 class _Stall(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -121,6 +149,23 @@ class _Stall(BaseHTTPRequestHandler):
 
 
 class AbortTests(unittest.TestCase):
+    def test_a_dropped_send_is_not_posted_again(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _DropSend)
+        server.posts = 0
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        client = HttpGmail("token", base=f"http://{host}:{port}", timeout=2)
+        try:
+            client._json("GET", "/gmail/v1/users/me/profile")
+            with self.assertRaises(Offline):
+                client.send_message(b"From: a@b.c\r\n\r\nHi\r\n", "")
+            self.assertEqual(server.posts, 1)
+        finally:
+            client.close()
+            server.shutdown()
+            server.server_close()
+
     def test_abort_refuses_the_next_request(self) -> None:
         client = HttpGmail("token", base="http://127.0.0.1:1", timeout=5)
         client.abort()
