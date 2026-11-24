@@ -106,9 +106,11 @@ CREATE TABLE snoozed (
 
 CREATE INDEX snoozed_until ON snoozed(until_ms);
 
--- Bytes already handed to messages.send. A later confirm must not post them again.
+-- Confirmed sends. fingerprint is the X-Gmail-Tui token.
+-- confirmed=0 means a post's reply was lost and Sent did not show the token yet.
 CREATE TABLE sent_mail (
-  fingerprint TEXT PRIMARY KEY
+  fingerprint TEXT PRIMARY KEY,
+  confirmed INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE message_text (

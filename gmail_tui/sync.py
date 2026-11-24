@@ -339,19 +339,68 @@ class Engine:
         return _opened(self.store.opened_message(gmail_id))
 
     def send_reply(self, raw: bytes, thread_id: str) -> str:
-        # messages.send is not idempotent. Refresh first, record the bytes,
-        # then post exactly once. A quota, timeout, or 5xx can mean Gmail
-        # already stored the copy.
+        # messages.send is not idempotent. The X-Gmail-Tui token is a hash of
+        # the message. A lost reply is settled by looking for that header in
+        # Sent. A refusal (4xx, quota) leaves the token unclaimed.
         self.refresh_auth()
-        fingerprint = hashlib.sha256(raw).hexdigest()
-
-        def _post() -> IncomingMessage:
-            if not self.store.remember_sent(fingerprint):
-                raise GmailError("already sent")
-            return self.gmail.send_message(raw, thread_id)
-
-        sent = self._call(UNITS_SEND, _post, repeat=False)
+        raw = stamp_tracking(raw)
+        token = message_token(raw)
+        if self.store.sent_before(token):
+            raise GmailError("already sent")
+        if self.store.send_pending(token):
+            try:
+                found = self._find_sent(token)
+            except GmailError as exc:
+                raise GmailError(f"{exc} — couldn't check Sent") from exc
+            if found is not None:
+                self.store.remember_sent(token)
+                return self._store_outgoing(found, raw, thread_id, ["SENT"])
+        try:
+            sent = self._call(
+                UNITS_SEND,
+                lambda: self.gmail.send_message(raw, thread_id),
+                repeat=False,
+            )
+        except GmailError as exc:
+            if _send_refused(exc):
+                self.store.forget_send(token)
+                raise
+            return self._settle_send(raw, thread_id, token, exc)
+        self.store.remember_sent(token)
         return self._store_outgoing(sent, raw, thread_id, ["SENT"])
+
+    def _settle_send(self, raw: bytes, thread_id: str, token: str, exc: GmailError) -> str:
+        """A timeout or 5xx may mean the copy is already in Sent."""
+        try:
+            found = self._find_sent(token)
+        except GmailError as check_exc:
+            self.store.note_send_pending(token)
+            raise GmailError(f"{exc} — couldn't check Sent") from check_exc
+        if found is not None:
+            self.store.remember_sent(token)
+            return self._store_outgoing(found, raw, thread_id, ["SENT"])
+        self.store.note_send_pending(token)
+        raise GmailError(f"{exc} — not in Sent") from exc
+
+    def _find_sent(self, token: str) -> IncomingMessage | None:
+        """The newest Sent messages, matched on X-Gmail-Tui. None when absent."""
+        page = self._call(
+            UNITS_LIST,
+            lambda: self.gmail.list_messages("SENT", "newer_than:1d"),
+            repeat=False,
+        )
+        for item in page.messages[:_SENT_LOOK]:
+            try:
+                meta = self._call(
+                    UNITS_GET,
+                    lambda mid=item.id: self.gmail.get_message(mid, MessageFormat.METADATA),
+                    repeat=False,
+                )
+            except NotFound:
+                continue
+            if meta.tracking_id == token:
+                return meta
+        return None
 
     def save_draft(self, raw: bytes, thread_id: str) -> str:
         saved = self._call(
@@ -726,6 +775,68 @@ class Engine:
                 if attempts > 5:
                     raise
                 self.quota.backoff(attempts)
+
+
+_SENT_LOOK = 15
+_TRACKING_NAME = b"x-gmail-tui"
+
+
+def message_token(raw: bytes) -> str:
+    """Stable id for one outgoing message, ignoring the tracking header itself."""
+    return hashlib.sha256(_without_tracking(raw)).hexdigest()
+
+
+def stamp_tracking(raw: bytes) -> bytes:
+    """Put ``X-Gmail-Tui`` on ``raw``. The value is ``message_token(raw)``."""
+    token = message_token(raw).encode("ascii")
+    head, sep, body = _split_mail(raw)
+    if not sep:
+        sep = b"\r\n\r\n"
+    newline = b"\r\n" if sep.startswith(b"\r\n") or b"\r\n" in head else b"\n"
+    lines = head.split(newline) if head else []
+    field = b"X-Gmail-Tui: " + token
+    for index, line in enumerate(lines):
+        name, _colon, _value = line.partition(b":")
+        if name.lower() != _TRACKING_NAME:
+            continue
+        if line == field:
+            return raw
+        lines[index] = field
+        return newline.join(lines) + sep + body
+    lines.append(field)
+    return newline.join(lines) + sep + body
+
+
+def _without_tracking(raw: bytes) -> bytes:
+    head, sep, body = _split_mail(raw)
+    if not sep:
+        return raw
+    newline = b"\r\n" if b"\r\n" in head else b"\n"
+    kept = [
+        line
+        for line in head.split(newline)
+        if line.split(b":", 1)[0].lower() != _TRACKING_NAME
+    ]
+    return newline.join(kept) + sep + body
+
+
+def _split_mail(raw: bytes) -> tuple[bytes, bytes, bytes]:
+    for sep in (b"\r\n\r\n", b"\n\n"):
+        index = raw.find(sep)
+        if index != -1:
+            return raw[:index], sep, raw[index + len(sep) :]
+    return raw, b"", b""
+
+
+def _send_refused(exc: GmailError) -> bool:
+    """True when this post did not send. A timeout or 5xx stays False."""
+    if isinstance(exc, (RateLimited, Offline)):
+        return isinstance(exc, RateLimited)
+    if isinstance(exc, HttpStatus):
+        if is_precondition_failed(exc.code, str(exc)):
+            return False
+        return 400 <= exc.code < 500
+    return "redirected a send" in str(exc)
 
 
 class UrgentWork:

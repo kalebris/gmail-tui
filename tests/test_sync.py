@@ -1231,10 +1231,13 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(RateLimited):
             self.engine.send_reply(b"From: me\r\n\r\nHi\r\n", "")
         self.assertEqual(len(calls), 1)
-        self.engine.gmail.send_message = original  # type: ignore[method-assign]
-        self.assertTrue(
+        self.assertFalse(
             self.engine.store.sent_before(hashlib.sha256(b"From: me\r\n\r\nHi\r\n").hexdigest())
         )
+        with self.assertRaises(RateLimited):
+            self.engine.send_reply(b"From: me\r\n\r\nHi\r\n", "")
+        self.assertEqual(len(calls), 2)
+        self.engine.gmail.send_message = original  # type: ignore[method-assign]
 
     def test_an_unauthorized_send_is_posted_once(self) -> None:
         calls: list[bytes] = []
@@ -1247,6 +1250,37 @@ class SyncTests(unittest.TestCase):
         with self.assertRaises(HttpStatus):
             self.engine.send_reply(b"From: me\r\n\r\nHi\r\n", "")
         self.assertEqual(len(calls), 1)
+
+    def test_a_lost_send_found_in_sent_is_not_posted_again(self) -> None:
+        raw = b"From: me\r\n\r\nHi\r\n"
+        original = self.engine.gmail.send_message
+
+        def lost(payload: bytes, thread_id: str):
+            original(payload, thread_id)
+            raise Offline("timed out")
+
+        self.engine.gmail.send_message = lost  # type: ignore[method-assign]
+        self.engine.send_reply(raw, "")
+        self.assertEqual(len(self.engine.gmail.sent), 1)
+        self.engine.gmail.send_message = original  # type: ignore[method-assign]
+        with self.assertRaises(GmailError):
+            self.engine.send_reply(raw, "")
+        self.assertEqual(len(self.engine.gmail.sent), 1)
+
+    def test_a_lost_send_missing_from_sent_can_be_posted_again(self) -> None:
+        raw = b"From: me\r\n\r\nHi\r\n"
+
+        def lost(_payload: bytes, _thread_id: str):
+            raise Offline("timed out")
+
+        self.engine.gmail.send_message = lost  # type: ignore[method-assign]
+        with self.assertRaises(GmailError) as caught:
+            self.engine.send_reply(raw, "")
+        self.assertIn("not in Sent", str(caught.exception))
+        self.assertEqual(self.engine.gmail.sent, [])
+        del self.engine.gmail.send_message
+        self.engine.send_reply(raw, "")
+        self.assertEqual(len(self.engine.gmail.sent), 1)
 
     def test_the_same_bytes_are_sent_once(self) -> None:
         raw = b"From: me\r\n\r\nHi\r\n"

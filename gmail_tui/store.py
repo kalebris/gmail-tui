@@ -224,8 +224,8 @@ class Store:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version == 0:
             conn.executescript(_SCHEMA)
-            conn.execute("PRAGMA user_version=9")
-        elif version < 9:
+            conn.execute("PRAGMA user_version=10")
+        elif version < 10:
             if version < 2:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
                 if "has_attachment" not in columns:
@@ -280,14 +280,20 @@ class Store:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS snoozed_until ON snoozed(until_ms)"
                 )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sent_mail (
-                  fingerprint TEXT PRIMARY KEY
+            if version < 9:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS sent_mail (
+                      fingerprint TEXT PRIMARY KEY
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute("PRAGMA user_version=9")
+            sent_columns = {row[1] for row in conn.execute("PRAGMA table_info(sent_mail)")}
+            if "confirmed" not in sent_columns:
+                conn.execute(
+                    "ALTER TABLE sent_mail ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 1"
+                )
+            conn.execute("PRAGMA user_version=10")
         store = cls(path, conn)
         store.replay_pending()
         return store
@@ -542,24 +548,54 @@ class Store:
                 (email or current, history_id, messages_total),
             )
 
-    def remember_sent(self, fingerprint: str) -> bool:
-        """Claim these bytes for one messages.send. False if already claimed."""
+    def remember_sent(self, fingerprint: str) -> None:
+        """Record that Gmail accepted this X-Gmail-Tui token."""
         with self._tx():
-            cursor = self.conn.execute(
-                "INSERT OR IGNORE INTO sent_mail (fingerprint) VALUES (?)",
+            self.conn.execute(
+                """
+                INSERT INTO sent_mail (fingerprint, confirmed) VALUES (?, 1)
+                ON CONFLICT(fingerprint) DO UPDATE SET confirmed=1
+                """,
                 (fingerprint,),
             )
-            return cursor.rowcount == 1
+
+    def note_send_pending(self, fingerprint: str) -> None:
+        """The post's reply was lost. The next attempt checks Sent before posting."""
+        with self._tx():
+            self.conn.execute(
+                """
+                INSERT INTO sent_mail (fingerprint, confirmed) VALUES (?, 0)
+                ON CONFLICT(fingerprint) DO NOTHING
+                """,
+                (fingerprint,),
+            )
+
+    def forget_send(self, fingerprint: str) -> None:
+        """Drop an unconfirmed token so a refused draft can be posted again."""
+        with self._tx():
+            self.conn.execute(
+                "DELETE FROM sent_mail WHERE fingerprint=? AND confirmed=0",
+                (fingerprint,),
+            )
+
+    def send_pending(self, fingerprint: str) -> bool:
+        row = self.conn.execute(
+            "SELECT confirmed FROM sent_mail WHERE fingerprint=?",
+            (fingerprint,),
+        ).fetchone()
+        return row is not None and int(row[0]) == 0
 
     def sent_before(self, fingerprint: str) -> bool:
         row = self.conn.execute(
-            "SELECT 1 FROM sent_mail WHERE fingerprint=?",
+            "SELECT 1 FROM sent_mail WHERE fingerprint=? AND confirmed=1",
             (fingerprint,),
         ).fetchone()
         return row is not None
 
     def sent_fingerprints(self) -> set[str]:
-        rows = self.conn.execute("SELECT fingerprint FROM sent_mail").fetchall()
+        rows = self.conn.execute(
+            "SELECT fingerprint FROM sent_mail WHERE confirmed=1"
+        ).fetchall()
         return {str(row[0]) for row in rows}
 
     def account_email(self) -> str:

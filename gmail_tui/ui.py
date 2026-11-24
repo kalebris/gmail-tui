@@ -13,7 +13,6 @@ marks messages so archive, delete, and label changes apply to every marked row.
 from __future__ import annotations
 
 import curses
-import hashlib
 import os
 import shlex
 import sqlite3
@@ -44,7 +43,7 @@ from gmail_tui.textutil import (
     safe_filename,
 )
 from gmail_tui.threads import arrange, bare_subject
-from gmail_tui.sync import Engine
+from gmail_tui.sync import Engine, message_token
 from gmail_tui.terminal import launch_editor
 
 PAGE = 100
@@ -2087,34 +2086,35 @@ class MailSession:
             body="\n".join(self.compose_lines),
             in_reply_to=self.compose_reply_to,
         )
-        fingerprint = _compose_fingerprint(raw)
-        if fingerprint in self._sent_fingerprints:
+        token = message_token(raw)
+        if token in self._sent_fingerprints:
             self.prompt = None
             self._sending = True
             self.notice = "already sent"
             self._clear_compose_fields()
             self.load_reader(fetch=False)
             return
-        # Lock before the network call so a buffered Enter/click cannot start
-        # another send, and so a timed-out request that still reached Gmail
-        # cannot be retried with the same body.
+        # One send at a time. The dialog stays up when Gmail refuses or Sent
+        # does not yet show this token, so the same draft can be confirmed again.
         self._sending = True
-        self.prompt = None
-        self._sent_fingerprints.add(fingerprint)
         try:
             self.engine.send_reply(raw, self.compose_thread)
         except GmailError as exc:
-            # Any answer, including a hard 400, can arrive after Gmail stored
-            # the copy. The fingerprint stays, so this draft is not posted again.
-            self._send_uncertain(exc or "send failed")
+            text = str(exc) or "send failed"
+            if "already sent" in text:
+                self._sent_fingerprints.add(token)
+                self.prompt = None
+                self.notice = "already sent"
+                self._clear_compose_fields()
+                self.load_reader(fetch=False)
+                return
+            self._sending = False
+            self.prompt = "send"
+            self.notice = text
             return
+        self._sent_fingerprints.add(token)
+        self.prompt = None
         self.notice = "sent"
-        self._clear_compose_fields()
-        self.load_reader(fetch=False)
-
-    def _send_uncertain(self, reason: object) -> None:
-        """The POST may have reached Gmail. Do not offer the same draft again."""
-        self.notice = f"{reason} — check Sent before trying again"
         self._clear_compose_fields()
         self.load_reader(fetch=False)
 
@@ -4281,10 +4281,6 @@ def compose_message(
         message["References"] = token
     message.set_content(body if body.endswith("\n") else body + "\n")
     return message.as_bytes()
-
-
-def _compose_fingerprint(raw: bytes) -> str:
-    return hashlib.sha256(raw).hexdigest()
 
 
 def _message_line(

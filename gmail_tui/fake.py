@@ -23,6 +23,15 @@ from gmail_tui.gmail import (
 )
 
 
+def _tracking(raw: bytes) -> str:
+    for line in raw.splitlines():
+        if not line:
+            break
+        if line.lower().startswith(b"x-gmail-tui:"):
+            return line.split(b":", 1)[1].strip().decode("ascii", "replace")
+    return ""
+
+
 def make_raw(
     *,
     subject: str,
@@ -329,6 +338,7 @@ class FakeGmail:
             message_id_header=parsed.message_id_header or mid,
             in_reply_to=parsed.in_reply_to,
             references_header=parsed.references,
+            tracking_id=_tracking(stamped),
         )
 
     def create_label(self, name: str) -> Label:
@@ -354,6 +364,7 @@ class FakeGmail:
             to_addr=message.to_addr,
             cc_addr=message.cc_addr,
             message_id_header=f"<{message.id}@example.com>",
+            tracking_id=_tracking(message.raw()),
             raw=None,
         )
 
@@ -375,6 +386,8 @@ class FakeGmail:
             elif lowered.startswith("subject:"):
                 if token.split(":", 1)[1].lower() not in message.subject.lower():
                     return False
+            elif lowered.startswith(("newer_than:", "older_than:", "after:", "before:", "in:")):
+                continue
             else:
                 terms.append(lowered)
         if unread is True and "UNREAD" not in message.label_ids:

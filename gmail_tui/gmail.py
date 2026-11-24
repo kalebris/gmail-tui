@@ -129,6 +129,8 @@ class IncomingMessage:
     size_estimate: int | None = None
     raw: bytes | None = None
     has_attachment: bool | None = None
+    # X-Gmail-Tui token, when this copy was sent by this client.
+    tracking_id: str = ""
     # Set when the raw message was already parsed. None means the body text
     # still has to be read from ``raw``.
     body_text: str | None = None

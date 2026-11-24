@@ -37,7 +37,16 @@ from gmail_tui.gmail import (
 from gmail_tui.textutil import parse_rfc822
 
 _BASE = "https://gmail.googleapis.com"
-_HEADER_NAMES = ("From", "To", "Cc", "Subject", "Message-ID", "In-Reply-To", "References")
+_HEADER_NAMES = (
+    "From",
+    "To",
+    "Cc",
+    "Subject",
+    "Message-ID",
+    "In-Reply-To",
+    "References",
+    "X-Gmail-Tui",
+)
 
 
 class HttpStatus(GmailError):
@@ -660,6 +669,7 @@ def parse_message(data: dict[str, Any]) -> IncomingMessage:
         message_id_header=headers.get("message_id", ""),
         in_reply_to=headers.get("in_reply_to", ""),
         references_header=headers.get("references", ""),
+        tracking_id=headers.get("tracking", ""),
         size_estimate=int(size) if isinstance(size, int) else None,
         raw=raw,
         has_attachment=has_attachment,
@@ -701,6 +711,8 @@ def _headers(payload: dict[str, Any]) -> dict[str, str]:
             found["in_reply_to"] = _str(header.get("value"))
         elif name == "references":
             found["references"] = _str(header.get("value"))
+        elif name == "x-gmail-tui":
+            found["tracking"] = _str(header.get("value"))
         elif name in ("subject", "from", "to", "cc"):
             found[name] = _str(header.get("value"))
     return found
