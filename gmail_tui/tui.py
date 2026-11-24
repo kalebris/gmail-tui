@@ -890,8 +890,8 @@ def _loop(
         if action == "compose":
             if session.external is not None:
                 session.notice = "already writing a message"
-            elif session.begin_compose():
-                session.begin_external_edit()
+            else:
+                session.begin_compose()
             continue
         if action == "reply-all" or action == "reply":
             if session.external is not None:
@@ -1708,10 +1708,13 @@ def _edit_prompt(session: MailSession, key: str | int, keys: KeyMap) -> None:
         session.prompt_move(1)
         return
     action = _action(keys, key)
-    if session.prompt == "save" and (
-        key in ("\t",) or key == curses.KEY_BTAB or action in {"next-pane", "prev-pane"}
-    ):
-        session.prompt_complete(reverse=key == curses.KEY_BTAB or action == "prev-pane")
+    completing = key in ("\t",) or key == curses.KEY_BTAB or action in {"next-pane", "prev-pane"}
+    reverse = key == curses.KEY_BTAB or action == "prev-pane"
+    if session.prompt == "save" and completing:
+        session.prompt_complete(reverse=reverse)
+        return
+    if session.prompt == "compose" and completing:
+        session.complete_compose_address(reverse=reverse)
         return
     if session.prompt == "save" and (key == "?" or action == "help"):
         session.prompt_list_folders()
@@ -1909,7 +1912,7 @@ def _mouse(session: MailSession, screen: curses.window) -> int | None:
     released = getattr(curses, "BUTTON1_RELEASED", 0)
     pressed = getattr(curses, "BUTTON1_PRESSED", 0)
     clicked = curses.BUTTON1_CLICKED
-    modal = session.prompt == "send"
+    modal = session.prompt in {"send", "compose"}
     inside = _point_in_popup(session.popup, y, x)
     # Prefer RELEASED for the send dialog. Many terminals also emit CLICKED for
     # the same press; handling both used to confirm Send twice before the
@@ -1929,7 +1932,10 @@ def _mouse(session: MailSession, screen: curses.window) -> int | None:
         session.clear_mark()
         if modal:
             if popup_click and inside:
-                session.click_popup_choice(y)
+                if session.prompt == "compose":
+                    session.focus_compose_field(y)
+                else:
+                    session.click_popup_choice(y)
             return None
         return _mouse_click(session, screen, x, y)
     # Motion while held (1002) or a pressed event with a new cell: grow the mark.

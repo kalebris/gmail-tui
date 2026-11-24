@@ -613,8 +613,8 @@ class MailboxTests(unittest.TestCase):
             "\n"
             "> hello there\n"
         )
-        to, cc, subject, body = parse_draft(written)
-        self.assertEqual((to, cc, subject), ("ada@example.com", "", "Re: Hello"))
+        to, cc, bcc, subject, body = parse_draft(written)
+        self.assertEqual((to, cc, bcc, subject), ("ada@example.com", "", "", "Re: Hello"))
         self.assertEqual(body, "Hi Ada: thanks for the note\nSee you then\n\n> hello there")
         gmail = FakeGmail()
         engine = Engine.open(self.tmp.name, gmail)
@@ -626,6 +626,67 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(session.notice, "sent")
             sent = message_from_bytes(gmail.sent[0], policy=default)
             self.assertTrue(sent.get_content().startswith("Hi Ada: thanks for the note\n"))
+        finally:
+            engine.store.close()
+
+    def test_compose_completes_an_address_before_the_editor(self) -> None:
+        from gmail_tui.ui import render_lines
+
+        gmail = FakeGmail()
+        engine = Engine.open(self.tmp.name, gmail)
+        try:
+            session = MailSession(engine)
+            session._compose_contacts = (
+                "ada@example.com",
+                "ann@example.com",
+                "bea@example.com",
+                "cy@example.com",
+            )
+            session.prompt = "compose"
+            session.prompt_cursor = 0
+            session.compose_to = "b"
+            session.complete_compose_address()
+            self.assertEqual(session.compose_to, "bea@example.com")
+            self.assertEqual(session.prompt_hint, "")
+            session.compose_to = "a"
+            session._compose_matches = []
+            session.complete_compose_address()
+            self.assertEqual(session.compose_to, "ada@example.com")
+            self.assertEqual(session.prompt_hint, "1/2")
+            session.complete_compose_address()
+            self.assertEqual(session.compose_to, "ann@example.com")
+            session.compose_to = "ada@example.com"
+            session.prompt_cursor = 1
+            session.compose_cc = "ada@example.com, c"
+            session._compose_matches = []
+            session.complete_compose_address()
+            self.assertEqual(session.compose_cc, "ada@example.com, cy@example.com")
+            session.compose_bcc = "hidden@example.com"
+            session.compose_lines = [""]
+            opened: list[str] = []
+
+            def launch() -> bool:
+                opened.append(session.draft_text())
+                return True
+
+            session.begin_external_edit = launch  # type: ignore[method-assign]
+            session.prompt_accept()
+            self.assertIsNone(session.prompt)
+            self.assertEqual(
+                opened,
+                [
+                    "To: ada@example.com\n"
+                    "Cc: ada@example.com, cy@example.com\n"
+                    "Bcc: hidden@example.com\n"
+                    "Subject: \n"
+                    "\n"
+                ],
+            )
+            session.prompt = "compose"
+            session.prompt_cursor = 2
+            painted = "\n".join(render_lines(session, 24, 80))
+            self.assertIn("To: ada@example.com", painted)
+            self.assertIn("Bcc: hidden@example.com_", painted)
         finally:
             engine.store.close()
 

@@ -352,7 +352,7 @@ snooze, inbox, help.
 | `z-a` | toggle folder fold |
 | `Enter` | list that folder’s mail |
 | `/` | filter folders |
-| `c` | write a new message in another window |
+| `c` | address a new message, then edit it |
 | `C` | open the calendar |
 | `q` | quit (clears an active search first) |
 
@@ -372,7 +372,7 @@ snooze, inbox, help.
 | `l` | add or remove a label |
 | `u` / `n` | toggle unread / jump to next unread |
 | `o` | newest or oldest first |
-| `c` | write a new message in another window |
+| `c` | address a new message, then edit it |
 | `C` | open the calendar |
 | `r` / `R` | reply-all / reply |
 | `A` / `m` | attachments / MIME parts |
@@ -389,7 +389,7 @@ snooze, inbox, help.
 | `j`/`k`, space/PgDn, PgUp, `g`/`G` | scroll the body |
 | `q` / `←` | back to the mail list |
 | `/` | find in this message |
-| `c` | write a new message in another window |
+| `c` | address a new message, then edit it |
 | `C` | open the calendar |
 | `r` / `R` | reply-all / reply |
 | `A` / `m` / `v` | attachments / MIME parts / show picture |
@@ -399,7 +399,7 @@ snooze, inbox, help.
 | `O` | open the next link (`open` in the config, or `xdg-open`) |
 | `a`/`e`, `b`, `d`, `l`, `u`, `n`, `U`, `H` | archive, snooze, delete, label, unread, undo, holding |
 
-`c`, `r`, and `R` open `$EDITOR` in a new terminal (`GMAIL_TUI_TERMINAL` is that command; otherwise kitty, foot, alacritty, and the other common terminals). This window keeps running, so other mail can be read while the message is written. When the editor exits, a dialog offers Send or Save as draft. Drag with the mouse to highlight text; the selection is copied.
+`c` opens a To, Cc, and Bcc dialog first. Tab completes the address being typed from the From and To headers of mail already stored. Enter then opens `$EDITOR` in a new terminal (`GMAIL_TUI_TERMINAL` is that command; otherwise kitty, foot, alacritty, and the other common terminals). `r` and `R` open the editor directly. This window keeps running, so other mail can be read while the message is written. When the editor exits, a dialog offers Send or Save as draft. Drag with the mouse to highlight text; the selection is copied.
 
 **Calendar** (`C`)
 

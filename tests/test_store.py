@@ -94,6 +94,30 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.missing_body_ids(1), ["old"])
         self.assertEqual(self.store.missing_body_ids(2), ["old", "new"])
 
+    def test_contact_addresses_come_from_from_and_to(self) -> None:
+        self.store.set_profile("me@example.com", "1", 2)
+        self.store.upsert_metadata(
+            _message("in", "t1", 2_000, "hello", ["INBOX"], sender="Ada <ada@example.com>"),
+            "present",
+        )
+        self.store.conn.execute(
+            "UPDATE messages SET to_addr=? WHERE gmail_id=?",
+            ("Me <me@example.com>, Bea <bea@example.com>", "in"),
+        )
+        self.store.upsert_metadata(
+            _message("out", "t2", 3_000, "sent", ["SENT"], sender="me@example.com"),
+            "present",
+        )
+        self.store.conn.execute(
+            "UPDATE messages SET to_addr=? WHERE gmail_id=?",
+            ("Cy <cy@example.com>", "out"),
+        )
+        self.assertEqual(
+            self.store.contact_addresses(),
+            ["ada@example.com", "bea@example.com", "cy@example.com"],
+        )
+        self.assertEqual(self.store.contact_addresses(), ["ada@example.com", "bea@example.com", "cy@example.com"])
+
     def test_a_locked_store_does_not_fail_the_open_folder_write(self) -> None:
         other = sqlite3.connect(Path(self.tmp.name) / "index.sqlite")
         other.execute("BEGIN IMMEDIATE")

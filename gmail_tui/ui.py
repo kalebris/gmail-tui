@@ -148,10 +148,14 @@ class MailSession:
         self.prompt_hint = ""
         self.compose_to = ""
         self.compose_cc = ""
+        self.compose_bcc = ""
         self.compose_subject = ""
         self.compose_lines: list[str] = []
         self.compose_thread = ""
         self.compose_reply_to = ""
+        self._compose_contacts: tuple[str, ...] = ()
+        self._compose_matches: list[str] = []
+        self._compose_match_i = -1
         self._sending = False
         # Bodies already handed to Gmail (or ambiguously interrupted mid-send).
         self._sent_fingerprints = self.engine.store.sent_fingerprints()
@@ -1242,9 +1246,14 @@ class MailSession:
         self._refresh_prompt()
 
     def begin_compose(self) -> bool:
-        """Start a blank outgoing message (not a reply)."""
+        """Ask for To, Cc, and Bcc before the editor opens."""
         self._reset_compose()
         self.compose_lines = [""]
+        self.prompt = "compose"
+        self.prompt_cursor = 0
+        self.prompt_text = ""
+        self.prompt_hint = ""
+        self._compose_contacts = tuple(self.engine.store.contact_addresses())
         self.notice = ""
         return True
 
@@ -1283,10 +1292,13 @@ class MailSession:
     def _reset_compose(self) -> None:
         self.compose_to = ""
         self.compose_cc = ""
+        self.compose_bcc = ""
         self.compose_subject = ""
         self.compose_lines = []
         self.compose_thread = ""
         self.compose_reply_to = ""
+        self._compose_matches = []
+        self._compose_match_i = -1
         self._sending = False
 
     def begin_holding(self) -> None:
@@ -1863,13 +1875,63 @@ class MailSession:
             start_new_session=True,
         )
 
+    def _compose_field(self) -> str:
+        if self.prompt_cursor <= 0:
+            return self.compose_to
+        if self.prompt_cursor == 1:
+            return self.compose_cc
+        return self.compose_bcc
+
+    def _set_compose_field(self, value: str) -> None:
+        if self.prompt_cursor <= 0:
+            self.compose_to = value
+        elif self.prompt_cursor == 1:
+            self.compose_cc = value
+        else:
+            self.compose_bcc = value
+
+    def complete_compose_address(self, *, reverse: bool = False) -> None:
+        """Fill the address being typed from From and To headers already stored."""
+        if self.prompt != "compose":
+            return
+        current = self._compose_field()
+        if self._compose_matches:
+            step = -1 if reverse else 1
+            self._compose_match_i = (self._compose_match_i + step) % len(self._compose_matches)
+            chosen = self._compose_matches[self._compose_match_i]
+            self._set_compose_field(_join_address(current, chosen))
+            self.prompt_hint = f"{self._compose_match_i + 1}/{len(self._compose_matches)}"
+            return
+        prefix = _address_fragment(current)
+        if not prefix:
+            self.prompt_hint = "type to complete"
+            return
+        folded = prefix.casefold()
+        matches = [addr for addr in self._compose_contacts if addr.casefold().startswith(folded)]
+        if not matches:
+            self.prompt_hint = "no match"
+            return
+        self._compose_matches = matches
+        self._compose_match_i = len(matches) - 1 if reverse else 0
+        self._set_compose_field(_join_address(current, matches[self._compose_match_i]))
+        self.prompt_hint = "" if len(matches) == 1 else f"{self._compose_match_i + 1}/{len(matches)}"
+
+    def focus_compose_field(self, y: int) -> None:
+        if self.prompt != "compose" or self.popup is None:
+            return
+        index = y - (self.popup[0] + 1)
+        if 0 <= index <= 2:
+            self.prompt_cursor = index
+            self._compose_matches = []
+            self.prompt_hint = ""
+
     def draft_text(self) -> str:
         lines = [f"To: {self.compose_to}"]
-        if self.compose_cc:
-            lines.append(f"Cc: {self.compose_cc}")
-        elif not self.compose_reply_to:
+        if self.compose_cc or not self.compose_reply_to:
             # Blank compose: leave a Cc line to fill in the editor.
-            lines.append("Cc: ")
+            lines.append(f"Cc: {self.compose_cc}")
+        if self.compose_bcc:
+            lines.append(f"Bcc: {self.compose_bcc}")
         lines.append(f"Subject: {self.compose_subject}")
         lines.append("")
         lines.extend(self.compose_lines)
@@ -1885,9 +1947,10 @@ class MailSession:
         if status != 0:
             self.notice = "not sent"
             return
-        to, cc, subject, body = parse_draft(edited)
+        to, cc, bcc, subject, body = parse_draft(edited)
         self.compose_to = to
         self.compose_cc = cc
+        self.compose_bcc = bcc
         self.compose_subject = subject
         self.compose_lines = body.split("\n")
         self._sending = False
@@ -2019,6 +2082,7 @@ class MailSession:
             from_addr=self.engine.store.account_email(),
             to_addr=self.compose_to,
             cc_addr=self.compose_cc,
+            bcc_addr=self.compose_bcc,
             subject=self.compose_subject,
             body="\n".join(self.compose_lines),
             in_reply_to=self.compose_reply_to,
@@ -2057,10 +2121,12 @@ class MailSession:
     def _clear_compose_fields(self) -> None:
         self.compose_to = ""
         self.compose_cc = ""
+        self.compose_bcc = ""
         self.compose_subject = ""
         self.compose_lines = []
         self.compose_thread = ""
         self.compose_reply_to = ""
+        self._compose_matches = []
 
     def save_draft(self) -> None:
         if self.prompt != "send" or self._sending:
@@ -2070,6 +2136,7 @@ class MailSession:
             from_addr=self.engine.store.account_email(),
             to_addr=self.compose_to,
             cc_addr=self.compose_cc,
+            bcc_addr=self.compose_bcc,
             subject=self.compose_subject,
             body="\n".join(self.compose_lines),
             in_reply_to=self.compose_reply_to,
@@ -2089,6 +2156,11 @@ class MailSession:
         if not self.prompt or not text:
             return
         if self.prompt == "quit":
+            return
+        if self.prompt == "compose":
+            self._set_compose_field(self._compose_field() + text)
+            self._compose_matches = []
+            self.prompt_hint = ""
             return
         if self.prompt == "send":
             if text == "j":
@@ -2127,6 +2199,11 @@ class MailSession:
         self._refresh_prompt()
 
     def prompt_backspace(self) -> None:
+        if self.prompt == "compose":
+            self._set_compose_field(self._compose_field()[:-1])
+            self._compose_matches = []
+            self.prompt_hint = ""
+            return
         if self.prompt == "save":
             self.prompt_text = self.prompt_text[:-1]
             self._clear_save_complete()
@@ -2227,6 +2304,11 @@ class MailSession:
             else:
                 self.prompt_cursor = _clamp(self.prompt_cursor + delta, count)
             return
+        if self.prompt == "compose":
+            self.prompt_cursor = _clamp(self.prompt_cursor + delta, 3)
+            self._compose_matches = []
+            self.prompt_hint = ""
+            return
         if self.prompt == "send":
             if delta == 0:
                 return
@@ -2257,6 +2339,12 @@ class MailSession:
 
     def prompt_cancel(self) -> None:
         if not self.prompt:
+            return
+        if self.prompt == "compose":
+            self.prompt = None
+            self.prompt_text = ""
+            self.prompt_hint = ""
+            self._reset_compose()
             return
         if self.prompt == "send":
             self.prompt = None
@@ -2297,6 +2385,13 @@ class MailSession:
             self.reader_scroll = self._saved_reader_scroll
 
     def prompt_accept(self) -> None:
+        if self.prompt == "compose":
+            self.prompt = None
+            self.prompt_hint = ""
+            self._compose_matches = []
+            if not self.begin_external_edit():
+                self.prompt = "compose"
+            return
         if self.prompt == "send":
             choice = _COMPOSE_CHOICES[_clamp(self.prompt_cursor, len(_COMPOSE_CHOICES))]
             if choice == "Send":
@@ -3116,6 +3211,7 @@ def render_lines(
     _write_save(canvas, session, geo)
     _write_quit(canvas, session, geo)
     _write_compose(canvas, session, geo)
+    _write_compose_addresses(canvas, session, geo)
     _write_help(canvas, session, geo)
     canvas.write(geo.height - 1, 0, status_bar(session, geo.width))
     return canvas.lines()
@@ -3588,7 +3684,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("toggle-fold", "toggle a folder"),
         ("activate", "list that folder's mail"),
         ("search", "filter folders"),
-        ("compose", "new message in another window"),
+        ("compose", "address a new message, then edit it"),
         ("quit", "quit"),
         *_SHARED_HELP,
     ),
@@ -3614,7 +3710,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("toggle-unread", "toggle unread"),
         ("next-unread", "next unread"),
         ("order", "newest or oldest first"),
-        ("compose", "new message in another window"),
+        ("compose", "address a new message, then edit it"),
         ("reply-all", "reply to everyone"),
         ("reply", "reply to the sender"),
         ("attachments", "list attachments"),
@@ -3639,7 +3735,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("quit", "back to the mail list"),
         ("left", "back to the mail list"),
         ("search", "find in this message"),
-        ("compose", "new message in another window"),
+        ("compose", "address a new message, then edit it"),
         ("reply-all", "reply to everyone"),
         ("reply", "reply to the sender"),
         ("attachments", "list attachments"),
@@ -3669,7 +3765,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("escape", "back to the message"),
         ("quit", "back to the mail list"),
         ("left", "back to the mail list"),
-        ("compose", "new message in another window"),
+        ("compose", "address a new message, then edit it"),
         ("reply-all", "reply to everyone"),
         ("reply", "reply to the sender"),
         ("archive", "archive"),
@@ -3686,7 +3782,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("quit", "back to the mail list"),
         ("left", "back to the mail list"),
         ("attachments", "list attachments"),
-        ("compose", "new message in another window"),
+        ("compose", "address a new message, then edit it"),
         ("reply-all", "reply to everyone"),
         ("reply", "reply to the sender"),
         ("archive", "archive"),
@@ -3873,6 +3969,33 @@ def _write_compose(canvas: _Canvas, session: MailSession, geo: Geometry) -> None
     session.popup_choices = (top + 2, top + 3)
 
 
+def _write_compose_addresses(canvas: _Canvas, session: MailSession, geo: Geometry) -> None:
+    if session.prompt != "compose":
+        return
+    labels = ("To: ", "Cc: ", "Bcc: ")
+    values = (session.compose_to, session.compose_cc, session.compose_bcc)
+    rows = [
+        label + value + ("_" if index == session.prompt_cursor else "")
+        for index, (label, value) in enumerate(zip(labels, values, strict=True))
+    ]
+    hint = session.prompt_hint or "up/down moves    tab completes    enter edits"
+    title = "Compose"
+    longest = max(_display_width(title), _display_width(hint), *(_display_width(row) for row in rows))
+    width = min(geo.width - 2, max(48, longest + 4))
+    left = max(0, (geo.width - width) // 2)
+    height = 6
+    top = max(0, (geo.height - 1 - height) // 2)
+    if top + height > geo.height - 1:
+        top = max(0, geo.height - 1 - height)
+    for row in range(height):
+        canvas.write(top + row, left, " " * width)
+    _dialog(canvas, top, left, height, width, title)
+    for offset, row in enumerate(rows):
+        canvas.write(top + 1 + offset, left + 1, _clip(row, width - 2))
+    canvas.write(top + 4, left + 1, _clip(hint, width - 2))
+    session.popup = (top, left, height, width)
+
+
 def _write_quit(canvas: _Canvas, session: MailSession, geo: Geometry) -> None:
     if session.prompt != "quit":
         return
@@ -3917,6 +4040,8 @@ def format_activity(session: MailSession, width: int) -> str:
     if session.prompt == "label":
         hint = f"  {session.prompt_hint}" if session.prompt_hint else ""
         return _clip(f"label {session.prompt_text}_{hint}", max(0, width - 1))
+    if session.prompt == "compose":
+        return _clip("up/down moves    tab completes    enter edits", max(0, width - 1))
     if session.prompt == "send":
         return _clip("send or save as draft", max(0, width - 1))
     if session.prompt == "holding":
@@ -4081,13 +4206,25 @@ def edit_draft(text: str, run) -> tuple[str | None, int]:
         path.unlink(missing_ok=True)
 
 
-_DRAFT_HEADERS = {"to", "cc", "subject"}
+def _address_fragment(value: str) -> str:
+    """The address still being typed, after the last comma."""
+    return value.rpartition(",")[2].strip()
 
 
-def parse_draft(text: str) -> tuple[str, str, str, str]:
-    """To, Cc, Subject, and the message body.
+def _join_address(value: str, address: str) -> str:
+    head, sep, _fragment = value.rpartition(",")
+    if not sep:
+        return address
+    return f"{head}, {address}"
 
-    Only a leading To, Cc, or Subject line is a header. The line typed under
+
+_DRAFT_HEADERS = {"to", "cc", "bcc", "subject"}
+
+
+def parse_draft(text: str) -> tuple[str, str, str, str, str]:
+    """To, Cc, Bcc, Subject, and the message body.
+
+    Only a leading To, Cc, Bcc, or Subject line is a header. The line typed under
     Subject is the start of the body, including when it contains a colon.
     One blank line after those headers is the separator and is left out.
     """
@@ -4095,7 +4232,7 @@ def parse_draft(text: str) -> tuple[str, str, str, str]:
     if normalized.endswith("\n"):
         normalized = normalized[:-1]
     lines = normalized.split("\n")
-    to = cc = subject = ""
+    to = cc = bcc = subject = ""
     index = 0
     while index < len(lines):
         name, colon, value = lines[index].partition(":")
@@ -4107,12 +4244,14 @@ def parse_draft(text: str) -> tuple[str, str, str, str]:
             to = value
         elif key == "cc":
             cc = value
+        elif key == "bcc":
+            bcc = value
         else:
             subject = value
         index += 1
     if index < len(lines) and lines[index] == "":
         index += 1
-    return to, cc, subject, "\n".join(lines[index:])
+    return to, cc, bcc, subject, "\n".join(lines[index:])
 
 
 def compose_message(
@@ -4123,6 +4262,7 @@ def compose_message(
     subject: str,
     body: str,
     in_reply_to: str,
+    bcc_addr: str = "",
 ) -> bytes:
     message = EmailMessage()
     if from_addr.strip():
@@ -4130,6 +4270,8 @@ def compose_message(
     message["To"] = to_addr.strip()
     if cc_addr.strip():
         message["Cc"] = cc_addr.strip()
+    if bcc_addr.strip():
+        message["Bcc"] = bcc_addr.strip()
     message["Subject"] = subject
     token = in_reply_to.strip()
     if token:

@@ -12,6 +12,7 @@ import secrets
 import sqlite3
 import threading
 from collections import OrderedDict
+from email.utils import getaddresses
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -563,6 +564,40 @@ class Store:
 
     def account_email(self) -> str:
         return str(self._state()["email"] or "")
+
+    def contact_addresses(self) -> list[str]:
+        """Addresses seen in From or To, excluding this mailbox.
+
+        The scan is cached until the message count changes. Compose loads it
+        once when the address dialog opens, not on each Tab.
+        """
+        count = int(self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+        cached = getattr(self, "_contact_cache", None)
+        if cached is not None and cached[0] == count:
+            return list(cached[1])
+        rows = self.conn.execute(
+            """
+            SELECT from_addr FROM messages WHERE from_addr != ''
+            UNION
+            SELECT to_addr FROM messages WHERE to_addr != ''
+            """
+        )
+        mine = self.account_email().strip().casefold()
+        seen: set[str] = set()
+        found: list[str] = []
+        for (raw,) in rows:
+            for _name, addr in getaddresses([str(raw)]):
+                addr = addr.strip()
+                if "@" not in addr:
+                    continue
+                key = addr.casefold()
+                if key == mine or key in seen:
+                    continue
+                seen.add(key)
+                found.append(addr)
+        found.sort(key=str.casefold)
+        self._contact_cache = (count, found)
+        return list(found)
 
     def set_email(self, email: str) -> None:
         current = self.account_email()
