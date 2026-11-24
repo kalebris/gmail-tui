@@ -58,6 +58,7 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(keys.action(ord("F")), "headers")
         self.assertEqual(keys.action(ord("L")), "urls")
         self.assertEqual(keys.action(ord("O")), "open-url")
+        self.assertEqual(keys.action(ord("o") & 0x1F), "pick-url")
         self.assertEqual(keys.action(ord("U")), "undo")
         self.assertEqual(keys.action(ord("]")), "next-account")
         self.assertEqual(keys.action(ord("[")), "prev-account")

@@ -52,6 +52,7 @@ DEFAULT_BINDINGS: dict[str, tuple[str, ...]] = {
     "headers": ("F",),
     "urls": ("L",),
     "open-url": ("O",),
+    "pick-url": ("ctrl-o",),
     "undo": ("U",),
     "next-account": ("]",),
     "prev-account": ("[",),
@@ -133,6 +134,7 @@ def default_text(path: Path | None = None) -> str:
         "# One action per line: action, then the keys that run it.",
         "# Actions omitted here keep the defaults. Keys are case-sensitive.",
         "# Special keys: tab enter space backtab up down left right home end pageup pagedown",
+        "# Control keys: ctrl-o, and the same form for any other letter.",
         "# Alt keys: alt-l, alt-L, and the same form for any other letter.",
         "# Two-key sequences use a hyphen: g-i means press g, then i.",
         "# Example: down j down",
@@ -195,6 +197,8 @@ def defaults() -> KeyMap:
 
 
 def _chords(name: str, lineno: int | None = None) -> tuple[tuple[int, ...], ...]:
+    if name.startswith("ctrl-"):
+        return tuple((code,) for code in _codes(name, lineno))
     if "-" in name and not name.startswith("alt-"):
         parts = name.split("-")
         if len(parts) != 2 or not all(parts):
@@ -206,6 +210,8 @@ def _chords(name: str, lineno: int | None = None) -> tuple[tuple[int, ...], ...]
 
 
 def _codes(name: str, lineno: int | None = None) -> tuple[int, ...]:
+    if name.startswith("ctrl-") and len(name) == 6 and "a" <= name[5] <= "z":
+        return (ord(name[5]) & 0x1F,)
     if name.startswith("alt-") and len(name) > 4:
         base = name[4:]
         if base.startswith("alt-"):
@@ -222,4 +228,4 @@ def _codes(name: str, lineno: int | None = None) -> tuple[int, ...]:
 def _unknown_key(name: str, lineno: int | None) -> str:
     where = f"line {lineno}: " if lineno is not None else ""
     known = " ".join(sorted(_SPECIAL))
-    return f"{where}unknown key {name} (special keys: {known}; alt-letter for Alt)"
+    return f"{where}unknown key {name} (special keys: {known}; alt-letter; ctrl-letter)"

@@ -1461,6 +1461,32 @@ class MailboxTests(unittest.TestCase):
         finally:
             engine.store.close()
 
+    def test_pick_url_opens_the_labeled_link(self) -> None:
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            session.open_command = ("firefox", "-P", "Work")
+            opened: list[str] = []
+            session._open_browser = opened.append  # type: ignore[method-assign]
+            session.begin_url_pick(
+                [
+                    (4, 1, "link", "https://example.com/a"),
+                    (5, 1, "link", "https://example.com/b"),
+                ]
+            )
+            self.assertEqual(session.notice, "pick a link")
+            self.assertEqual([hint.label for hint in session.url_hints or ()], ["s", "a"])
+            session.type_url_hint("s")
+            self.assertEqual(opened, ["https://example.com/a"])
+            self.assertIsNone(session.url_hints)
+            self.assertIn("opened", session.notice)
+            session.begin_url_pick([(4, 1, "link", "https://example.com/a")])
+            session.type_url_hint("x")
+            self.assertIsNone(session.url_hints)
+            self.assertEqual(opened, ["https://example.com/a"])
+        finally:
+            engine.store.close()
+
     def test_html_only_body_matches_mime_focus(self) -> None:
         engine = Engine.open(self.tmp.name, NullGmail())
         try:

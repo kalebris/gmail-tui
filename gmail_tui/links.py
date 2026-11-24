@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 
 LABEL = "link"
+# Same home-row order foot uses for URL jump labels.
+JUMP = "sadfjklewcmpgh"
 
 _URL = re.compile(r"(?i)(?<![A-Za-z0-9+.-])(?:https?://|mailto:)\S+")
 _MARK = re.compile(r"(?<![A-Za-z0-9])link ((?:https?://|mailto:)\S+)")
@@ -46,6 +48,32 @@ _STOP = frozenset(
         "your",
     }
 )
+
+
+def jump_labels(count: int) -> list[str]:
+    """Short unique hints for ``count`` visible links, in ``JUMP`` order."""
+    if count <= 0:
+        return []
+    width = 1
+    space = len(JUMP)
+    while space < count:
+        width += 1
+        space *= len(JUMP)
+    labels: list[str] = []
+
+    def walk(prefix: str) -> None:
+        if len(labels) == count:
+            return
+        if len(prefix) == width:
+            labels.append(prefix)
+            return
+        for letter in JUMP:
+            walk(prefix + letter)
+            if len(labels) == count:
+                return
+
+    walk("")
+    return labels
 
 
 def osc8(label: str, url: str) -> str:

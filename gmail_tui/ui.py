@@ -12,6 +12,7 @@ marks messages so archive, delete, and label changes apply to every marked row.
 
 from __future__ import annotations
 
+import curses
 import hashlib
 import os
 import shlex
@@ -29,7 +30,7 @@ from pathlib import Path
 from gmail_tui.accounts import Account
 from gmail_tui.gmail import GmailError, Offline
 from gmail_tui.labels import FlatLabel, TreeNode, build_label_tree, expandable_keys, flatten
-from gmail_tui.links import LABEL, link_spans, present_links, strip_link_urls
+from gmail_tui.links import LABEL, jump_labels, link_spans, present_links, strip_link_urls
 from gmail_tui.search import parse_query
 from gmail_tui.snooze import SnoozeChoice, parse_duration, presets as snooze_presets
 from gmail_tui.store import HeldChange, MessagePreview, MessageSummary, ThreadCursor
@@ -84,6 +85,16 @@ class ReaderMark:
     links: tuple[tuple[int, str], ...] = ()
 
 
+@dataclass(frozen=True)
+class UrlHint:
+    """One visible link during pick mode: screen cell, destination, jump label."""
+
+    y: int
+    x: int
+    url: str
+    label: str
+
+
 class _ExternalEdit:
     """A compose buffer open in another terminal."""
 
@@ -125,6 +136,9 @@ class MailSession:
         self.open_command: tuple[str, ...] = ("xdg-open",)
         self._link_key: tuple[str, int] | None = None
         self._link_pick: int | None = None
+        # Jump labels over the visible link words. None until pick-url starts.
+        self.url_hints: tuple[UrlHint, ...] | None = None
+        self.url_typed = ""
         # Last link a click opened, so the matching release does not launch twice.
         self._mouse_link: tuple[int, int, str] | None = None
         self._mouse_link_at = 0.0
@@ -1742,6 +1756,64 @@ class MailSession:
     def terminal_opens_links(self) -> bool:
         """The default opener matches the terminal, which opens OSC 8 clicks."""
         return self.open_command == ("xdg-open",)
+
+    def begin_url_pick(self, regions: list[tuple[int, int, str, str]]) -> None:
+        """Show a jump label on each visible link. A matching key opens it."""
+        if not regions:
+            self.url_hints = None
+            self.url_typed = ""
+            self.notice = "no link"
+            return
+        labels = jump_labels(len(regions))
+        self.url_hints = tuple(
+            UrlHint(y, x, url, label)
+            for (y, x, _text, url), label in zip(regions, labels, strict=True)
+        )
+        self.url_typed = ""
+        self.notice = "pick a link"
+
+    def cancel_url_pick(self) -> None:
+        self.url_hints = None
+        self.url_typed = ""
+
+    def type_url_hint(self, key: str | int) -> None:
+        """Eat one key while jump labels are showing."""
+        if not self.url_hints:
+            return
+        if key in (curses.KEY_BACKSPACE, 127, 8, "\x7f", "\b"):
+            self.url_typed = self.url_typed[:-1]
+            self.notice = "pick a link" if not self.url_typed else f"link {self.url_typed}"
+            return
+        if not isinstance(key, str) or len(key) != 1 or not key.isprintable() or key == " ":
+            self.cancel_url_pick()
+            return
+        typed = self.url_typed + key
+        matches = [hint for hint in self.url_hints if hint.label.startswith(typed)]
+        if not matches:
+            self.cancel_url_pick()
+            return
+        self.url_typed = typed
+        if len(matches) == 1 and matches[0].label == typed:
+            url = matches[0].url
+            self.cancel_url_pick()
+            self.open_url(url)
+            return
+        self.notice = f"link {self.url_typed}"
+
+    def open_hint_at(self, y: int, x: int) -> bool:
+        """Open the hinted link under the pointer. A miss cancels the picker."""
+        if not self.url_hints:
+            return False
+        for hint in self.url_hints:
+            if not hint.label.startswith(self.url_typed):
+                continue
+            if y == hint.y and hint.x <= x < hint.x + len(LABEL):
+                url = hint.url
+                self.cancel_url_pick()
+                self.open_url(url)
+                return True
+        self.cancel_url_pick()
+        return True
 
     def open_link(self) -> None:
         """Open the next link at or below the reader scroll, then the one after."""
@@ -3551,6 +3623,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("headers", "show all header fields"),
         ("urls", "hide or show link addresses"),
         ("open-url", "open the next link"),
+        ("pick-url", "label visible links and open one"),
         ("holding", "mail waiting to be sent"),
         ("undo", "undo the last change"),
         ("quit", "quit"),
@@ -3576,6 +3649,7 @@ _HELP: dict[str, tuple[tuple[str, str], ...]] = {
         ("headers", "show all header fields, or only the short set"),
         ("urls", "hide or show link addresses"),
         ("open-url", "open the next link"),
+        ("pick-url", "label visible links and open one"),
         ("escape", "leave the raw source"),
         ("archive", "archive"),
         ("snooze", "snooze until later"),

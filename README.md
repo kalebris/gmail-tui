@@ -42,7 +42,7 @@ Links and HTML parts open with `xdg-open`. Set `open` to use another program; th
 open firefox -P settings
 ```
 
-That line applies to every profile. `~/.config/gmail-tui/profiles/work` (same folder as `config`, one file per `--profile` name) overrides it for that profile and contains only an `open` line. Home Manager writes both from `programs.gmail-tui.settings` and `programs.gmail-tui.profiles.<name>.open`. `O` opens the next link in the message. With the default `xdg-open`, a click still uses the terminal's OSC 8 hyperlink. A custom `open` command is what a click on the word `link` runs, and what opens an HTML part. Saved attachments stay on `xdg-open`.
+That line applies to every profile. `~/.config/gmail-tui/profiles/work` (same folder as `config`, one file per `--profile` name) overrides it for that profile and contains only an `open` line. Home Manager writes both from `programs.gmail-tui.settings` and `programs.gmail-tui.profiles.<name>.open`. The word `link` stays an OSC 8 hyperlink, so the terminal's URL mode can list it (foot: Ctrl+Shift+O). `O` opens the next link with the `open` command. Ctrl+O does the same job inside gmail-tui: each visible `link` gets a jump label, and the letter you press opens that address with the `open` command. A click on that word uses the command when it is not `xdg-open`. HTML parts use the same command. Saved attachments stay on `xdg-open`.
 
 If you previously used `gtui`, move or symlink the old dirs:
 

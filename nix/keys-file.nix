@@ -11,7 +11,7 @@ lib.concatStringsSep "\n" (
   [
     "# Managed by Nix — overrides only; omitted actions keep app defaults."
     "# Special keys: tab enter space backtab up down left right home end pageup pagedown"
-    "# Alt: alt-l   Sequences: g-i   Case-sensitive."
+    "# Alt: alt-l   Control: ctrl-o   Sequences: g-i   Case-sensitive."
     ""
   ]
   ++ lib.mapAttrsToList (

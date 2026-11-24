@@ -39,6 +39,8 @@
   "raw-source"
   "headers"
   "urls"
+  "open-url"
+  "pick-url"
   "undo"
   "next-account"
   "prev-account"

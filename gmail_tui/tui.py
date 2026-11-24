@@ -683,6 +683,9 @@ def _loop(
                 break
             continue
         if _is_escape(key):
+            if session.url_hints is not None:
+                session.cancel_url_pick()
+                continue
             if session.help_open:
                 session.help_open = False
                 continue
@@ -728,6 +731,9 @@ def _loop(
             continue
         if session.mark_start is not None:
             session.clear_mark()
+        if session.url_hints is not None:
+            session.type_url_hint(key)
+            continue
         if session.prompt:
             _edit_prompt(session, key, keys)
             if session.quitting:
@@ -865,6 +871,21 @@ def _loop(
             continue
         if action == "open-url":
             session.open_link()
+            continue
+        if action == "pick-url":
+            height, width = screen.getmaxyx()
+            geo = geometry(height, width)
+            session.begin_url_pick(
+                reader_hyperlinks(
+                    session.reader_view,
+                    session.reader_marks,
+                    session.reader_scroll,
+                    geo.list_h + 1,
+                    1,
+                    geo.reader_rows,
+                    geo.width,
+                )
+            )
             continue
         if action == "compose":
             if session.external is not None:
@@ -1262,12 +1283,15 @@ def _paint(screen: curses.window, session: MailSession, accounts: list[Account],
     _highlight_mark(screen, session)
     session.mark_rows = _mark_rows(session)
     _highlight_find(screen, session, geo)
+    if session.url_hints:
+        _paint_url_hints(screen, session)
     # Sixel and OSC-8 work fight the drag highlight and are expensive mid-drag.
     if session.marking:
         _refresh(screen, soft=True)
         return
     _refresh(screen)
-    _emit_hyperlinks(session, geo)
+    if not session.url_hints:
+        _emit_hyperlinks(session, geo)
     _request_sixel(session, geo)
     _emit_sixel(session, geo)
 
@@ -1341,14 +1365,31 @@ def _refresh(screen: curses.window, *, soft: bool = False) -> None:
         curses.putp(b"\x1b[?7h")
 
 
-def _emit_hyperlinks(session: MailSession, geo) -> None:
-    """Open the word link in front of a URL. The address itself stays plain text.
+def _paint_url_hints(screen: curses.window, session: MailSession) -> None:
+    """Underline each visible link and stamp its jump label, as foot's URL mode does."""
+    from gmail_tui.links import LABEL
 
-    A custom ``open`` command launches that program on click instead, so the
-    terminal's own opener does not also run.
+    typed = session.url_typed
+    marked = curses.A_UNDERLINE
+    stamp = curses.A_REVERSE | curses.A_BOLD | curses.A_UNDERLINE
+    for hint in session.url_hints or ():
+        if not hint.label.startswith(typed):
+            continue
+        show = hint.label[len(typed) :] or hint.label
+        try:
+            screen.chgat(hint.y, hint.x, len(LABEL), marked)
+        except curses.error:
+            pass
+        _add(screen, hint.y, hint.x, show, stamp)
+
+
+def _emit_hyperlinks(session: MailSession, geo) -> None:
+    """Mark each word ``link`` as an OSC 8 hyperlink.
+
+    Foot's URL mode (Ctrl+Shift+O) lists those cells, including when the
+    address itself is hidden. A custom ``open`` command still handles a click
+    inside the app; this only puts the destination on the cell.
     """
-    if not session.terminal_opens_links():
-        return
     if session.popup:
         return
     regions = reader_hyperlinks(
@@ -1901,6 +1942,9 @@ def _mouse(session: MailSession, screen: curses.window) -> int | None:
 
 
 def _mouse_click(session: MailSession, screen: curses.window, x: int, y: int) -> int | None:
+    if session.url_hints is not None:
+        session.open_hint_at(y, x)
+        return None
     height, width = screen.getmaxyx()
     geo = geometry(height, width)
     if y < geo.top:

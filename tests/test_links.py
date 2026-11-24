@@ -2,7 +2,7 @@
 
 import unittest
 
-from gmail_tui.links import osc8, present_links, strip_link_urls
+from gmail_tui.links import jump_labels, osc8, present_links, strip_link_urls
 from gmail_tui.store import MessagePreview
 from gmail_tui.ui import _display_width, format_reader, layout_reader, link_at, reader_hyperlinks
 
@@ -27,6 +27,13 @@ class LinkTextTests(unittest.TestCase):
         text = present_links(head + "\ntoday")
         self.assertIn("\n", text)
         self.assertIn("today", text.splitlines()[1])
+
+    def test_jump_labels_follow_the_foot_alphabet(self) -> None:
+        self.assertEqual(jump_labels(3), ["s", "a", "d"])
+        many = jump_labels(20)
+        self.assertEqual(len(many), 20)
+        self.assertEqual(len(set(many)), 20)
+        self.assertTrue(all(len(label) == 2 for label in many))
 
     def test_osc8_points_at_the_url_and_shows_the_word_link(self) -> None:
         self.assertEqual(
