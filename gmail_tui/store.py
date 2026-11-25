@@ -991,18 +991,29 @@ class Store:
             )
         if not updates:
             return
-        with self._tx():
-            for in_reply_to, references, message_id, message_pk in updates:
-                self.conn.execute(
-                    """
-                    UPDATE messages SET
-                      in_reply_to=CASE WHEN in_reply_to != '' THEN in_reply_to ELSE ? END,
-                      references_header=CASE WHEN references_header != '' THEN references_header ELSE ? END,
-                      message_id_header=CASE WHEN message_id_header != '' THEN message_id_header ELSE ? END
-                    WHERE id=?
-                    """,
-                    (in_reply_to, references, message_id, message_pk),
-                )
+        # Showing a thread runs on the UI thread. A sync or a send may still
+        # hold the write lock. Skip the fill and try on the next refresh
+        # rather than exiting the UI.
+        conn = self.conn
+        conn.execute("PRAGMA busy_timeout=200")
+        try:
+            with self._tx():
+                for in_reply_to, references, message_id, message_pk in updates:
+                    conn.execute(
+                        """
+                        UPDATE messages SET
+                          in_reply_to=CASE WHEN in_reply_to != '' THEN in_reply_to ELSE ? END,
+                          references_header=CASE WHEN references_header != '' THEN references_header ELSE ? END,
+                          message_id_header=CASE WHEN message_id_header != '' THEN message_id_header ELSE ? END
+                        WHERE id=?
+                        """,
+                        (in_reply_to, references, message_id, message_pk),
+                    )
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+        finally:
+            conn.execute("PRAGMA busy_timeout=5000")
 
     def list_label_info(self) -> list[LabelInfo]:
         # The mail list hides Trash except inside Trash. The badge has to do

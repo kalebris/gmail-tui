@@ -118,6 +118,34 @@ class StoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.contact_addresses(), ["ada@example.com", "bea@example.com", "cy@example.com"])
 
+    def test_a_locked_store_does_not_fail_thread_header_backfill(self) -> None:
+        message = _message("m1", "t1", 1_000, "Hi", ["INBOX"])
+        self.store.upsert_metadata(message, "missing")
+        self.store.write_body(
+            message,
+            b"Subject: Hi\r\nMessage-ID: <m@x>\r\nIn-Reply-To: <p@x>\r\nReferences: <p@x>\r\n\r\nbody\r\n",
+            "body",
+        )
+        self.store.conn.execute(
+            "UPDATE messages SET in_reply_to='', references_header='', message_id_header=''"
+        )
+        thread_id = int(self.store.conn.execute("SELECT thread_id FROM messages").fetchone()[0])
+        other = sqlite3.connect(Path(self.tmp.name) / "index.sqlite")
+        other.execute("BEGIN IMMEDIATE")
+        try:
+            started = time.monotonic()
+            shown = self.store.messages_in_thread(thread_id)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual([item.gmail_id for item in shown], ["m1"])
+            stored = self.store.conn.execute("SELECT in_reply_to FROM messages").fetchone()[0]
+            self.assertEqual(stored, "")
+        finally:
+            other.execute("ROLLBACK")
+            other.close()
+        self.store.messages_in_thread(thread_id)
+        stored = self.store.conn.execute("SELECT in_reply_to FROM messages").fetchone()[0]
+        self.assertEqual(stored, "<p@x>")
+
     def test_a_locked_store_does_not_fail_the_open_folder_write(self) -> None:
         other = sqlite3.connect(Path(self.tmp.name) / "index.sqlite")
         other.execute("BEGIN IMMEDIATE")
