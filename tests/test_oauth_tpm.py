@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import stat
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -154,6 +157,51 @@ class OAuthTpmTests(unittest.TestCase):
                     with self.assertRaises(OAuthError) as caught:
                         oauth_tpm.decrypt_bytes(path)
             self.assertIn("PIN", str(caught.exception))
+
+    def test_pin_entry_shows_a_star_per_character(self) -> None:
+        import pty
+
+        master, slave = pty.openpty()
+        found: dict[str, str] = {}
+
+        def run() -> None:
+            found["pin"] = oauth_tpm._read_pin("PIN: ", fd=slave)
+            found["again"] = oauth_tpm._read_pin("Again: ", fd=slave)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            shown = _read_until(master, b"PIN: ")
+            os.write(master, b"ab\x7f12\nsecond\n")
+            shown += _read_until(master, b"Again: ")
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            while True:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if not ready:
+                    break
+                shown += os.read(master, 1024)
+        finally:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(found["pin"], "a12")
+        self.assertEqual(found["again"], "second")
+        self.assertIn(b"**\x08 \x08**", shown)
+        self.assertIn(b"******", shown)
+        self.assertNotIn(b"a12", shown)
+        self.assertNotIn(b"second", shown)
+
+
+def _read_until(fd: int, marker: bytes) -> bytes:
+    buf = b""
+    deadline = time.monotonic() + 2
+    while marker not in buf:
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out waiting for {marker!r} in {buf!r}")
+        ready, _, _ = select.select([fd], [], [], 0.1)
+        if ready:
+            buf += os.read(fd, 1024)
+    return buf
 
 
 if __name__ == "__main__":

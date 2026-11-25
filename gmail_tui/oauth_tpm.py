@@ -26,6 +26,8 @@ _enabled = False
 _identity: Path | None = None
 _pin: str | None = None
 _recipient: str | None = None
+# Bytes already read past the newline, kept for the confirm prompt.
+_pin_pending = b""
 
 
 def encrypted_path(root: Path) -> Path:
@@ -59,6 +61,8 @@ def configure(*, enabled: bool, identity: Path | None = None, pin: str | None = 
 
 def reset() -> None:
     """Tests only: clear TPM policy."""
+    global _pin_pending
+    _pin_pending = b""
     configure(enabled=False)
 
 
@@ -222,14 +226,93 @@ def _resolve_pin(*, create: bool, prompt: bool) -> str:
     if not sys.stdin.isatty():
         raise OAuthError("TPM PIN required (set AGE_TPM_PIN or run on a TTY)")
     label = "Choose a TPM PIN for oauth storage: " if create else "TPM PIN for oauth: "
-    pin = getpass.getpass(label)
+    pin = _read_pin(label)
     if create:
-        again = getpass.getpass("Confirm TPM PIN: ")
+        again = _read_pin("Confirm TPM PIN: ")
         if pin != again:
             raise OAuthError("PIN confirmation did not match")
     if not pin:
         raise OAuthError("empty TPM PIN")
     return pin
+
+
+def _read_pin(prompt: str, *, fd: int | None = None) -> str:
+    """Read a PIN from the terminal, showing one ``*`` per character.
+
+    A paste shows one star per character, so it is obvious the PIN arrived.
+    Backspace and Ctrl+U erase stars with the characters.
+    """
+    global _pin_pending
+    try:
+        import termios
+        import tty
+    except ImportError:
+        return getpass.getpass(prompt)
+    target = sys.stdin.fileno() if fd is None else fd
+    try:
+        if not os.isatty(target):
+            return getpass.getpass(prompt)
+    except OSError:
+        return getpass.getpass(prompt)
+    old = termios.tcgetattr(target)
+    chars = bytearray()
+    try:
+        # Echo off before the prompt, so a paste cannot land while the
+        # terminal is still echoing the real characters.
+        tty.setcbreak(target, termios.TCSADRAIN)
+        os.write(target, prompt.encode())
+        buf = _pin_pending
+        _pin_pending = b""
+        skipping = False
+        while True:
+            if not buf:
+                buf = os.read(target, 1024)
+                if not buf:
+                    break
+            done = False
+            index = 0
+            while index < len(buf):
+                byte = buf[index]
+                index += 1
+                if skipping:
+                    if byte == ord("~") or 0x40 <= byte <= 0x7E:
+                        skipping = False
+                    continue
+                if byte in (10, 13):
+                    _pin_pending = buf[index:]
+                    done = True
+                    break
+                if byte in (8, 127):
+                    if chars:
+                        chars.pop()
+                        os.write(target, b"\b \b")
+                    continue
+                if byte == 3:
+                    raise KeyboardInterrupt
+                if byte == 4 and not chars:
+                    raise EOFError
+                if byte == 21:
+                    if chars:
+                        os.write(target, b"\b \b" * len(chars))
+                        chars.clear()
+                    continue
+                if byte == 27:
+                    skipping = True
+                    continue
+                if byte < 32:
+                    continue
+                chars.append(byte)
+                os.write(target, b"*")
+            buf = b""
+            if done:
+                break
+    finally:
+        termios.tcsetattr(target, termios.TCSADRAIN, old)
+        try:
+            os.write(target, b"\n")
+        except OSError:
+            pass
+    return chars.decode("utf-8", "replace")
 
 
 def _require_tools() -> None:
