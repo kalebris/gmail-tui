@@ -287,6 +287,8 @@ def run_tui(
             slot.session.sixel_cell = cell
             slot.session.download_dir = downloads
             slot.session.open_command = open_command
+            if user is not None:
+                slot.session.signature_path = user.signature
         images = _SixelPump(desk)
         global _images
         _images = images

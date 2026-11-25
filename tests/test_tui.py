@@ -459,7 +459,19 @@ class MailboxTests(unittest.TestCase):
         )
         self.assertEqual((to, cc, subject), ("ada@example.com", "", "Re: Hello"))
         self.assertEqual(lines[0], "")
-        self.assertIn("> hello there", lines)
+        self.assertEqual(lines[1], "> hello there")
+        signed = reply_draft(
+            from_addr="Ada <ada@example.com>",
+            to_addr="me@gmail.com",
+            cc_addr="",
+            subject="Hello",
+            body="hello there",
+            me="me@gmail.com",
+            everyone=False,
+            signature="-- \nAda\n",
+        )[3]
+        self.assertEqual(signed[:4], ["", "-- ", "Ada", ""])
+        self.assertEqual(signed[4], "> hello there")
         to, cc, subject, _lines = reply_draft(
             from_addr="Ada <ada@example.com>",
             to_addr="me@gmail.com, Bea <bea@example.com>",
@@ -690,6 +702,23 @@ class MailboxTests(unittest.TestCase):
             painted = "\n".join(render_lines(session, 24, 80))
             self.assertIn("To: ada@example.com", painted)
             self.assertIn("Bcc: hidden@example.com_", painted)
+        finally:
+            engine.store.close()
+
+    def test_signature_file_is_in_the_new_message(self) -> None:
+        gmail = FakeGmail()
+        engine = Engine.open(self.tmp.name, gmail)
+        try:
+            session = MailSession(engine)
+            path = Path(self.tmp.name) / "signature"
+            path.write_text("-- \nAda\n", encoding="utf-8")
+            session.signature_path = path
+            self.assertTrue(session.begin_compose())
+            self.assertIn("\n\n-- \nAda\n", session.draft_text())
+            session.signature_path = path.with_name("missing")
+            self.assertTrue(session.begin_compose())
+            self.assertNotIn("Ada", session.draft_text())
+            self.assertTrue(session.notice.startswith("signature:"))
         finally:
             engine.store.close()
 

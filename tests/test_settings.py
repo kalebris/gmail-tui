@@ -79,6 +79,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("oauth-tpm", text)
         self.assertIn("on-demand", text)
         self.assertIn("open", text)
+        self.assertIn("signature", text)
         self.assertIn("profiles/<name>", text)
 
     def test_on_demand_folders_default_and_override(self) -> None:
@@ -104,6 +105,10 @@ class SettingsTests(unittest.TestCase):
         finally:
             apply(parse(""))
             self.assertEqual(store.on_demand_labels(), frozenset(DEFAULT_ON_DEMAND))
+
+    def test_signature_is_a_path(self) -> None:
+        self.assertIsNone(parse("").signature)
+        self.assertEqual(parse("signature ~/mail/signature\n").signature, Path.home() / "mail" / "signature")
 
     def test_open_command_defaults_to_xdg_open_and_parses_argv(self) -> None:
         self.assertEqual(parse("").open_command, ("xdg-open",))

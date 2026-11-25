@@ -133,6 +133,8 @@ class MailSession:
         self.download_dir = Path.home() / "Downloads"
         # Links and HTML parts. Attachments stay on xdg-open.
         self.open_command: tuple[str, ...] = ("xdg-open",)
+        # Read when a new message or a reply is opened. None leaves the body bare.
+        self.signature_path: Path | None = None
         self._link_key: tuple[str, int] | None = None
         self._link_pick: int | None = None
         # Jump labels over the visible link words. None until pick-url starts.
@@ -1247,13 +1249,14 @@ class MailSession:
     def begin_compose(self) -> bool:
         """Ask for To, Cc, and Bcc before the editor opens."""
         self._reset_compose()
-        self.compose_lines = [""]
+        self.compose_lines = self._seed_lines()
         self.prompt = "compose"
         self.prompt_cursor = 0
         self.prompt_text = ""
         self.prompt_hint = ""
         self._compose_contacts = tuple(self.engine.store.contact_addresses())
-        self.notice = ""
+        if not self.notice.startswith("signature:"):
+            self.notice = ""
         return True
 
     def begin_reply(self, *, everyone: bool) -> bool:
@@ -1273,6 +1276,7 @@ class MailSession:
             body=body,
             me=self.engine.store.account_email(),
             everyone=everyone,
+            signature=self._signature_text(),
         )
         self._reset_compose()
         self.compose_to = to
@@ -1285,7 +1289,8 @@ class MailSession:
             # Sent-from-here copies used to lack Message-ID until re-fetched.
             reply_to = self.engine.store.message_id_for(current.gmail_id)
         self.compose_reply_to = reply_to
-        self.notice = ""
+        if not self.notice.startswith("signature:"):
+            self.notice = ""
         return True
 
     def _reset_compose(self) -> None:
@@ -1299,6 +1304,26 @@ class MailSession:
         self._compose_matches = []
         self._compose_match_i = -1
         self._sending = False
+
+    def _signature_text(self) -> str:
+        path = self.signature_path
+        if path is None:
+            return ""
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            self.notice = f"signature: {exc.strerror or exc}"
+            return ""
+        if self.notice.startswith("signature:"):
+            self.notice = ""
+        return text
+
+    def _seed_lines(self) -> list[str]:
+        """Blank line, then the signature, for a message that quotes nothing."""
+        signature = _signature_lines(self._signature_text())
+        if not signature:
+            return [""]
+        return ["", *signature]
 
     def begin_holding(self) -> None:
         self.held = self.engine.store.held_changes()
@@ -4136,6 +4161,16 @@ def _address_list(value: str) -> list[str]:
     return found
 
 
+def _signature_lines(text: str) -> list[str]:
+    """Lines of a signature file, without a trailing empty line from the final newline."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if normalized.endswith("\n"):
+        normalized = normalized[:-1]
+    if not normalized.strip():
+        return []
+    return normalized.split("\n")
+
+
 def reply_draft(
     *,
     from_addr: str,
@@ -4145,6 +4180,7 @@ def reply_draft(
     body: str,
     me: str,
     everyone: bool,
+    signature: str = "",
 ) -> tuple[str, str, str, list[str]]:
     """To, Cc, subject, and body lines for a reply or a reply to all."""
     senders = _address_list(from_addr)
@@ -4172,7 +4208,14 @@ def reply_draft(
     quoted = ["> " + line for line in body.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     if not quoted:
         quoted = ["> "]
-    return to, cc, title, ["", *quoted]
+    # A blank line to type in, the signature, then a blank line, then the quote.
+    lines = [""]
+    signed = _signature_lines(signature)
+    if signed:
+        lines.extend(signed)
+        lines.append("")
+    lines.extend(quoted)
+    return to, cc, title, lines
 
 
 def editor_command() -> list[str]:

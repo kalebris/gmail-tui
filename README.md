@@ -34,7 +34,10 @@ date %Y-%m-%d
 time %H:%M
 datetime %Y-%m-%d %H:%M
 weekday %a %d
+# signature ~/.config/gmail-tui/signature
 ```
+
+`signature` is a file. Its text is placed in a new message, and in a reply above the quoted original. The file is read when the editor opens.
 
 Links and HTML parts open with `xdg-open`. Set `open` to use another program; the URL or HTML file is added as the last argument:
 
@@ -148,6 +151,7 @@ use the system `pkgs`, e.g. `useGlobalPkgs = false`).
       # accounts = [ "ada@example.com" "bea@example.com" ];
       # download = "~/Downloads";
       # open = [ "xdg-open" ];
+      # signature = "~/.config/gmail-tui/signature";
     };
 
     # PATH wrappers: gmail-tui-work / gmail-tui-home.
@@ -399,7 +403,7 @@ snooze, inbox, help.
 | `O` | open the next link (`open` in the config, or `xdg-open`) |
 | `a`/`e`, `b`, `d`, `l`, `u`, `n`, `U`, `H` | archive, snooze, delete, label, unread, undo, holding |
 
-`c` opens a To, Cc, and Bcc dialog first. Tab completes the address being typed from the From and To headers of mail already stored. Enter then opens `$EDITOR` in a new terminal (`GMAIL_TUI_TERMINAL` is that command; otherwise kitty, foot, alacritty, and the other common terminals). `r` and `R` open the editor directly. This window keeps running, so other mail can be read while the message is written. When the editor exits, a dialog offers Send or Save as draft. Drag with the mouse to highlight text; the selection is copied.
+`c` opens a To, Cc, and Bcc dialog first. Tab completes the address being typed from the From and To headers of mail already stored. Enter then opens `$EDITOR` in a new terminal (`GMAIL_TUI_TERMINAL` is that command; otherwise kitty, foot, alacritty, and the other common terminals). `r` and `R` open the editor directly. A `signature` file from the config is already in the draft, above any quoted text. This window keeps running, so other mail can be read while the message is written. When the editor exits, a dialog offers Send or Save as draft. Drag with the mouse to highlight text; the selection is copied.
 
 **Calendar** (`C`)
 

@@ -186,6 +186,16 @@ in
             '';
           };
 
+          signature = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            example = "~/.config/gmail-tui/signature";
+            description = ''
+              Path to a signature file. Its text is inserted into a new message
+              or a reply, above any quoted text. Null leaves the line out.
+            '';
+          };
+
           open = lib.mkOption {
             type = lib.types.nullOr (lib.types.listOf lib.types.str);
             default = null;

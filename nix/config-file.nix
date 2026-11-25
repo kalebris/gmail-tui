@@ -26,6 +26,7 @@ let
       (lib.optionalString (settings.oauthTpmIdentity != null) "oauth-tpm-identity ${settings.oauthTpmIdentity}")
     ]
     ++ onDemand
+    ++ lib.optional (settings.signature != null) "signature ${settings.signature}"
     ++ lib.optional (settings.open != null) "open ${command settings.open}"
   );
 in

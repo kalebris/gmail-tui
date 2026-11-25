@@ -6,6 +6,7 @@ to ``$XDG_DATA_HOME/gmail-tui/`` (``~/.local/share/gmail-tui/``) so an installed
 ``gmail-tui`` on ``PATH`` does not depend on the current working directory.
 ``download`` is where saved attachments and xdg-open copies go.
 ``open`` is the program for a link or an HTML part (the target is appended).
+``signature`` is a file inserted into new messages and replies, above any quote.
 A ``profiles/<name>`` file beside the config overrides ``open`` for
 ``--profile <name>``.
 ``account`` lines, one address each, set the left-to-right order of the top bar.
@@ -46,6 +47,8 @@ class Settings:
     on_demand: tuple[str, ...] = DEFAULT_ON_DEMAND
     # Program for a link or an HTML part. The URL or file is appended.
     open_command: tuple[str, ...] = ("xdg-open",)
+    # File inserted above the quoted text in a new message or a reply.
+    signature: Path | None = None
 
 
 def xdg_config_home() -> Path:
@@ -149,6 +152,8 @@ def default_text(path: Path | None = None) -> str:
         "#            profiles/<name> beside this file overrides it for\n"
         "#            gmail-tui --profile <name>. That file is only an open line.\n"
         "#            Example: open firefox -P settings\n"
+        "# signature  file inserted into a new message or a reply, above any\n"
+        "#            quoted text. The file is read when the editor opens.\n"
         "#\n"
         f"download {download}\n"
         f"data {data}\n"
@@ -198,6 +203,7 @@ def parse(text: str) -> Settings:
     oauth_tpm_identity: Path | None = None
     on_demand: list[str] | None = None
     open_command = ("xdg-open",)
+    signature: Path | None = None
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -239,6 +245,8 @@ def parse(text: str) -> Settings:
             on_demand.append(_on_demand_label(value, lineno))
         elif name == "open":
             open_command = _open_command(value, lineno)
+        elif name == "signature":
+            signature = _path(value)
         else:
             raise SettingsError(f"line {lineno}: unknown setting {name}")
     if not seen_datetime or datetime_fmt is None:
@@ -255,6 +263,7 @@ def parse(text: str) -> Settings:
         oauth_tpm_identity=oauth_tpm_identity,
         on_demand=tuple(on_demand) if on_demand is not None else DEFAULT_ON_DEMAND,
         open_command=open_command,
+        signature=signature,
     )
 
 
