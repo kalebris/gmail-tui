@@ -858,9 +858,13 @@ class UrgentWork:
         # Label changes Gmail refused as a batch; the next turn sends them one
         # message at a time instead of paying the flat cost again.
         self._refused: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+        # Back off before retrying a queued send/draft after Offline or quota.
+        self._compose_after = 0.0
 
     def has_work(self, session) -> bool:
         if getattr(session, "label_todo", None):
+            return True
+        if getattr(session, "compose_todo", None):
             return True
         if self.paused:
             return False
@@ -880,6 +884,13 @@ class UrgentWork:
                 session.label_todo = []
                 self._inflight = ("local", todo)
                 self.phase = ""
+                return True
+            compose = getattr(session, "compose_todo", None)
+            if compose and time.monotonic() >= self._compose_after:
+                # The send dialog already closed; post the queued message next.
+                kind, raw, thread = compose.pop(0)
+                self._inflight = ("compose", kind, raw, thread)
+                self.phase = "sending" if kind == "send" else "saving draft"
                 return True
             if self.paused:
                 return False
@@ -931,6 +942,40 @@ class UrgentWork:
                     ready = ("error", str(exc), job)
                 else:
                     ready = ("local", done)
+            elif job[0] == "compose":
+                kind, raw, thread = job[1], job[2], job[3]
+                try:
+                    if kind == "send":
+                        self.engine.send_reply(raw, thread)
+                    else:
+                        self.engine.save_draft(raw, thread)
+                except Offline as exc:
+                    ready = ("compose-retry", kind, raw, thread, str(exc) or "offline")
+                except RateLimited as exc:
+                    ready = (
+                        "compose-retry",
+                        kind,
+                        raw,
+                        thread,
+                        str(exc) or "rate limited",
+                    )
+                except GmailError as exc:
+                    text = str(exc) or ("send failed" if kind == "send" else "draft failed")
+                    if kind == "send" and (
+                        "couldn't check Sent" in text or "not in Sent" in text
+                    ):
+                        ready = ("compose-retry", kind, raw, thread, text)
+                    elif kind == "send" and "already sent" in text:
+                        ready = ("compose", kind, "already sent", raw)
+                    else:
+                        ready = ("compose", kind, text, raw)
+                else:
+                    ready = (
+                        "compose",
+                        kind,
+                        "sent" if kind == "send" else "saved draft",
+                        raw,
+                    )
             elif job[0] == "open":
                 try:
                     self.engine.open_message(job[1])
@@ -994,6 +1039,32 @@ class UrgentWork:
                     for gmail_id in item[1]:
                         delta.pop(gmail_id, None)
                 continue
+            if kind == "compose-retry":
+                todo = getattr(session, "compose_todo", None)
+                if isinstance(todo, list):
+                    todo.insert(0, (item[1], item[2], item[3]))
+                self._compose_after = time.monotonic() + 5.0
+                self.phase = item[4]
+                session.notice = item[4]
+                continue
+            if kind == "compose":
+                session.notice = item[2]
+                raw = item[3]
+                if item[1] == "send":
+                    token = message_token(raw)
+                    if item[2] in {"sent", "already sent"}:
+                        fingerprints = getattr(session, "_sent_fingerprints", None)
+                        if isinstance(fingerprints, set):
+                            fingerprints.add(token)
+                    elif item[2] not in {"sending"}:
+                        fingerprints = getattr(session, "_sent_fingerprints", None)
+                        if isinstance(fingerprints, set):
+                            fingerprints.discard(token)
+                if item[2] in {"sent", "saved draft", "already sent"}:
+                    self.dirty = True
+                else:
+                    self.phase = item[2]
+                continue
             if kind in {"error", "offline"}:
                 # Offline after sleep is transient; keep the next open/push armed.
                 saw_fault = True
@@ -1010,6 +1081,7 @@ class UrgentWork:
             and not self.paused
             and not session.needs_fetch
             and not getattr(session, "label_todo", None)
+            and not getattr(session, "compose_todo", None)
             and not self.engine.store.has_pending_mutations()
         ):
             self.phase = ""

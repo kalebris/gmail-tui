@@ -165,6 +165,8 @@ class MailSession:
         self._compose_matches: list[str] = []
         self._compose_match_i = -1
         self._sending = False
+        # Send / save-draft after the dialog closes. UrgentWork posts them.
+        self.compose_todo: list[tuple[str, bytes, str]] = []
         # Bodies already handed to Gmail (or ambiguously interrupted mid-send).
         self._sent_fingerprints = self.engine.store.sent_fingerprints()
         self.external: _ExternalEdit | None = None
@@ -1359,9 +1361,9 @@ class MailSession:
                 self._show_reader(preview, self.messages[self.message_cursor].gmail_id)
                 self.reader_scroll = kept
         self._rewrap_reader(
-            max(1, geo.width - 2),
+            max(1, geo.width),
             geo.width,
-            1,
+            0,
         )
         max_reader = max(0, len(self.reader_view) - geo.reader_rows)
         self.reader_scroll = min(self.reader_scroll, max_reader)
@@ -1438,6 +1440,9 @@ class MailSession:
 
     def begin_compose(self) -> bool:
         """Ask for To, Cc, and Bcc before the editor opens."""
+        if self.external is not None:
+            self.notice = "already writing a message"
+            return False
         self._reset_compose()
         self.compose_lines = self._seed_lines()
         self.prompt = "compose"
@@ -1450,6 +1455,9 @@ class MailSession:
         return True
 
     def begin_reply(self, *, everyone: bool) -> bool:
+        if self.external is not None:
+            self.notice = "already writing a message"
+            return False
         if not self.messages:
             return False
         current = self.messages[self.message_cursor]
@@ -2237,6 +2245,26 @@ class MailSession:
         self._drop_external(pending)
         self.notice = "editor closed"
 
+    def refuse_external_escape(self) -> bool:
+        """Keep watching an open editor. True when Escape must not abandon it.
+
+        Esc used to drop the draft while the other window was still editing.
+        Saving that buffer then did nothing: no send dialog, draft gone.
+        """
+        pending = self.external
+        if pending is None:
+            return False
+        process = pending.process
+        if process is not None and hasattr(process, "poll"):
+            try:
+                if process.poll() is not None and not pending.sentinel.is_file():
+                    # The helper already exited without a sentinel; let Esc clear it.
+                    return False
+            except OSError:
+                return False
+        self.notice = "still writing in another window"
+        return True
+
     def _drop_external(self, pending: _ExternalEdit) -> None:
         self.external = None
         process = pending.process
@@ -2287,7 +2315,8 @@ class MailSession:
         self.send_compose()
 
     def send_compose(self) -> None:
-        if self._sending:
+        """Queue the send and close the dialog. Gmail runs on the account thread."""
+        if self.prompt != "send":
             return
         if not self.compose_to.strip():
             self.notice = "needs an address"
@@ -2302,36 +2331,13 @@ class MailSession:
             in_reply_to=self.compose_reply_to,
         )
         token = message_token(raw)
-        if token in self._sent_fingerprints:
-            self.prompt = None
-            self._sending = True
-            self.notice = "already sent"
-            self._clear_compose_fields()
-            self.load_reader(fetch=False)
-            return
-        # One send at a time. The dialog stays up when Gmail refuses or Sent
-        # does not yet show this token, so the same draft can be confirmed again.
-        self._sending = True
-        try:
-            self.engine.send_reply(raw, self.compose_thread)
-        except GmailError as exc:
-            text = str(exc) or "send failed"
-            if "already sent" in text:
-                self._sent_fingerprints.add(token)
-                self.prompt = None
-                self.notice = "already sent"
-                self._clear_compose_fields()
-                self.load_reader(fetch=False)
-                return
-            self._sending = False
-            self.prompt = "send"
-            self.notice = text
+        if token in self._sent_fingerprints or self.engine.store.sent_before(token):
+            self._dismiss_compose("already sent")
+            self._sent_fingerprints.add(token)
             return
         self._sent_fingerprints.add(token)
-        self.prompt = None
-        self.notice = "sent"
-        self._clear_compose_fields()
-        self.load_reader(fetch=False)
+        self.compose_todo.append(("send", raw, self.compose_thread))
+        self._dismiss_compose("sending")
 
     def _clear_compose_fields(self) -> None:
         self.compose_to = ""
@@ -2343,10 +2349,17 @@ class MailSession:
         self.compose_reply_to = ""
         self._compose_matches = []
 
-    def save_draft(self) -> None:
-        if self.prompt != "send" or self._sending:
-            return
+    def _dismiss_compose(self, notice: str) -> None:
         self.prompt = None
+        self._sending = False
+        self.notice = notice
+        self._clear_compose_fields()
+        self.load_reader(fetch=False)
+
+    def save_draft(self) -> None:
+        """Queue the draft and close the dialog. Gmail runs on the account thread."""
+        if self.prompt != "send":
+            return
         raw = compose_message(
             from_addr=self.engine.store.account_email(),
             to_addr=self.compose_to,
@@ -2356,16 +2369,8 @@ class MailSession:
             body="\n".join(self.compose_lines),
             in_reply_to=self.compose_reply_to,
         )
-        try:
-            self.engine.save_draft(raw, self.compose_thread)
-        except Offline as exc:
-            self.notice = str(exc) or "offline"
-            return
-        except GmailError as exc:
-            self.notice = str(exc) or "draft failed"
-            return
-        self.notice = "saved draft"
-        self.load_reader(fetch=False)
+        self.compose_todo.append(("draft", raw, self.compose_thread))
+        self._dismiss_compose("saving draft")
 
     def prompt_type(self, text: str) -> None:
         if not self.prompt or not text:
@@ -3406,6 +3411,8 @@ def geometry(height: int, width: int) -> Geometry:
     if list_span > mail_h - 6:
         list_span = max(5, mail_h // 2)
     list_h = top + list_span
+    # Status sits on the last row. The message pane has no bottom border, so
+    # reader text can use every row under the Message caption.
     bottom = height - 2
     if list_h >= bottom:
         list_h = bottom - 1
@@ -3413,7 +3420,7 @@ def geometry(height: int, width: int) -> Geometry:
     label_rows = max(1, list_h - top - 1)
     # The list pane uses one row for the column names and one for the rule under them.
     message_rows = max(1, list_h - top - 3)
-    reader_rows = max(1, bottom - list_h - 1)
+    reader_rows = max(1, bottom - list_h)
     return Geometry(height, width, sidebar_w, list_h, label_rows, message_rows, reader_rows, top)
 
 
@@ -4249,12 +4256,12 @@ def _write_quit(canvas: _Canvas, session: MailSession, geo: Geometry) -> None:
 
 
 def _write_reader(canvas: _Canvas, session: MailSession, geo: Geometry) -> None:
+    # No side borders: a terminal select should copy the letter, not the box.
     top = geo.list_h + 1
-    left = 1
-    width = geo.width - 2
+    width = geo.width
     rows = session.reader_view[session.reader_scroll : session.reader_scroll + geo.reader_rows]
     for offset, line in enumerate(rows):
-        canvas.write(top + offset, left, _clip(line, width))
+        canvas.write(top + offset, 0, _clip(line, width))
 
 
 def status_bar(session: MailSession, width: int) -> str:
@@ -4643,22 +4650,19 @@ def _caption(text: str, active: bool) -> str:
 
 def _frame(canvas: _Canvas, geo: Geometry, list_title: str, focus: str) -> None:
     top = geo.top
-    bottom = geo.height - 2
     right = geo.width - 1
     split_x = geo.sidebar_w - 1
     split_y = geo.list_h
-    if bottom <= top + 1 or right <= split_x + 1 or split_y <= top or split_y >= bottom:
+    if split_y <= top + 1 or right <= split_x + 1:
         return
+    # Folders and the mail list keep a box. The message under them has none,
+    # so a drag-select copies body text without the frame characters.
     _hline(canvas, top, 0, right, "┌", "─", "┐")
-    _hline(canvas, bottom, 0, right, "└", "─", "┘")
-    _hline(canvas, split_y, 0, right, "├", "─", "┤")
-    for row in range(top + 1, bottom):
-        if row == split_y:
-            continue
+    _hline(canvas, split_y, 0, right, "└", "─", "┘")
+    for row in range(top + 1, split_y):
         canvas.write(row, 0, "│")
         canvas.write(row, right, "│")
-        if row < split_y:
-            canvas.write(row, split_x, "│")
+        canvas.write(row, split_x, "│")
     canvas.write(top, split_x, "┬")
     reading = focus in {"reader", "attachments"}
     canvas.write(top, 1, _clip(_caption("Labels", focus == "labels"), max(0, split_x - 1)))

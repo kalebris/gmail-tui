@@ -705,7 +705,8 @@ def _loop(
             elif session.raw_source:
                 session.close_raw_source()
             elif session.external is not None:
-                session.forget_external_edit()
+                if not session.refuse_external_escape():
+                    session.forget_external_edit()
             continue
         if key == curses.KEY_MOUSE:
             before = (session.mark_start, session.mark_end, session.marking)
@@ -883,7 +884,7 @@ def _loop(
                     session.reader_marks,
                     session.reader_scroll,
                     geo.list_h + 1,
-                    1,
+                    0,
                     geo.reader_rows,
                     geo.width,
                 )
@@ -1402,7 +1403,7 @@ def _emit_hyperlinks(session: MailSession, geo) -> None:
         session.reader_marks,
         session.reader_scroll,
         geo.list_h + 1,
-        1,
+        0,
         geo.reader_rows,
         geo.width,
     )
@@ -1436,7 +1437,7 @@ def _request_sixel(session: MailSession, geo) -> None:
     rows = max(1, session.image_rows)
     # Leave one cell of slack so a slightly tall raster cannot cover the status line.
     pixels = (
-        max(8, (geo.width - 2) * cell_w - cell_w),
+        max(8, geo.width * cell_w - cell_w),
         max(6, rows * cell_h - cell_h),
     )
     session.sixel_pixels = pixels
@@ -1482,7 +1483,7 @@ def _emit_sixel(session: MailSession, geo) -> None:
         # The whole band must sit in the reader. A partial draw ran into the panes.
         if row <= geo.list_h or row + session.image_rows > bottom:
             continue
-        out += curses.tparm(cup, row, 1)
+        out += curses.tparm(cup, row, 0)
         out += payload
         drawn = True
     if not drawn:
@@ -1570,7 +1571,7 @@ def _open_message_attr(focus: str) -> int:
 
 
 def _highlight_find(screen: curses.window, session: MailSession, geo) -> None:
-    width = geo.width - 2
+    width = geo.width
     place = reader_match(session, width)
     if place is None:
         return
@@ -1578,9 +1579,9 @@ def _highlight_find(screen: curses.window, session: MailSession, geo) -> None:
     row = geo.list_h + 1 + view_row - session.reader_scroll
     if row <= geo.list_h or row >= geo.height - 1:
         return
-    if _popup_covers(session.popup, row, 1 + column, len(text)):
+    if _popup_covers(session.popup, row, column, len(text)):
         return
-    _add(screen, row, 1 + column, text, curses.A_REVERSE)
+    _add(screen, row, column, text, curses.A_REVERSE)
 
 
 def _repeatable_key(session: MailSession, key: str | int) -> bool:
@@ -1963,7 +1964,7 @@ def _mouse_click(session: MailSession, screen: curses.window, x: int, y: int) ->
             if start <= x < end:
                 return index
         return None
-    if y <= geo.top or y == geo.list_h or y >= geo.height - 2:
+    if y <= geo.top or y == geo.list_h or y >= geo.height - 1:
         return None
     if y > geo.list_h:
         if (
@@ -1979,7 +1980,7 @@ def _mouse_click(session: MailSession, screen: curses.window, x: int, y: int) ->
                 y,
                 x,
                 top=geo.list_h + 1,
-                pane_left=1,
+                pane_left=0,
                 rows=geo.reader_rows,
             )
             if url:

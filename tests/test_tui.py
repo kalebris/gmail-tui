@@ -14,13 +14,14 @@ import unittest
 from email import message_from_bytes
 from email.policy import default
 from pathlib import Path
+from types import SimpleNamespace
 
 from gmail_tui.accounts import Account
 from gmail_tui.fake import FakeGmail
 from gmail_tui.gmail import GmailError, IncomingMessage, Label, NullGmail, Offline, RateLimited
 from gmail_tui.labels import build_label_tree, flatten
 from gmail_tui.store import MessageCursor, Store
-from gmail_tui.sync import BackgroundSync, Engine
+from gmail_tui.sync import BackgroundSync, Engine, UrgentWork
 from gmail_tui.textutil import parse_rfc822, preferred_mime_index, reserve_download
 from gmail_tui.tui import (
     _alt_action,
@@ -562,13 +563,17 @@ class MailboxTests(unittest.TestCase):
             self.assertIn("Hi", session.reader)
             kept = list(session.messages)
             session.confirm_send()
-            self.assertEqual(session.prompt, "send")
-            self.assertIn("couldn't check Sent", session.notice)
-            self.assertEqual(session.messages, kept)
-            self.assertTrue(session.messages[0].unread)
-            session.prompt_type("n")
             self.assertIsNone(session.prompt)
-            self.assertEqual(session.notice, "not sent")
+            self.assertEqual(session.notice, "sending")
+            self.assertTrue(session.compose_todo)
+            self.assertEqual(session.messages, kept)
+            urgent = UrgentWork(engine)
+            urgent._compose_after = 0
+            self.assertTrue(urgent.step(session))
+            self.assertIn("couldn't check Sent", session.notice)
+            self.assertTrue(session.compose_todo)
+            self.assertTrue(session.messages[0].unread)
+            session.compose_todo.clear()
             session.finish_editor(draft, changed, 1)
             self.assertIsNone(session.prompt)
             self.assertEqual(session.notice, "not sent")
@@ -603,6 +608,9 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(session.prompt, "send")
             self.assertEqual(gmail.sent, [])
             session.prompt_type("y")
+            self.assertIsNone(session.prompt)
+            self.assertEqual(session.notice, "sending")
+            UrgentWork(engine).step(session)
             self.assertEqual(session.notice, "sent")
             self.assertTrue(session.messages[0].unread)
             sent = message_from_bytes(gmail.sent[0], policy=default)
@@ -638,6 +646,8 @@ class MailboxTests(unittest.TestCase):
             session.begin_reply(everyone=False)
             session.finish_editor("", written, 0)
             session.confirm_send()
+            self.assertEqual(session.notice, "sending")
+            UrgentWork(engine).step(session)
             self.assertEqual(session.notice, "sent")
             sent = message_from_bytes(gmail.sent[0], policy=default)
             self.assertTrue(sent.get_content().startswith("Hi Ada: thanks for the note\n"))
@@ -747,11 +757,15 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(session.prompt, "send")
             self.assertIn("send or save as draft", format_activity(session, 80))
             session.prompt_type("y")
-            self.assertEqual(session.notice, "sent")
-            self.assertEqual(len(gmail.sent), 1)
-            # A second confirm (queued Enter/click) must not send again.
+            self.assertIsNone(session.prompt)
+            self.assertEqual(session.notice, "sending")
+            self.assertTrue(session.compose_todo)
+            # A second confirm after the dialog closed must not queue again.
             session.confirm_send()
             session.send_compose()
+            self.assertEqual(len(session.compose_todo), 1)
+            UrgentWork(engine).step(session)
+            self.assertEqual(session.notice, "sent")
             self.assertEqual(len(gmail.sent), 1)
             self.assertTrue(any(call.startswith("messages.send:") for call in gmail.calls))
             self.assertIn("messages.get:sent-1:raw", gmail.calls)
@@ -768,6 +782,7 @@ class MailboxTests(unittest.TestCase):
             session.confirm_send()
             self.assertEqual(len(gmail.sent), 1)
             self.assertIn("already sent", session.notice)
+            self.assertFalse(session.compose_todo)
             session.begin_compose()
             session.finish_editor(
                 filled,
@@ -778,6 +793,9 @@ class MailboxTests(unittest.TestCase):
             shown = "\n".join(render_lines(session, 24, 90))
             self.assertIn("> Save as draft", shown)
             session.prompt_accept()
+            self.assertIsNone(session.prompt)
+            self.assertEqual(session.notice, "saving draft")
+            UrgentWork(engine).step(session)
             self.assertEqual(session.notice, "saved draft")
             self.assertEqual(len(gmail.drafts), 1)
             self.assertTrue(any(call.startswith("drafts.create:") for call in gmail.calls))
@@ -787,7 +805,7 @@ class MailboxTests(unittest.TestCase):
         finally:
             engine.store.close()
 
-    def test_offline_send_does_not_allow_blind_retry(self) -> None:
+    def test_offline_send_stays_queued_without_a_blind_retry(self) -> None:
         engine = Engine.open(self.tmp.name, NullGmail())
         try:
             session = MailSession(engine)
@@ -800,7 +818,6 @@ class MailboxTests(unittest.TestCase):
                 "Hi there\n"
             )
             calls: list[int] = []
-            real_send = engine.gmail.send_message
 
             def send(raw: bytes, thread_id: str):
                 calls.append(1)
@@ -809,17 +826,25 @@ class MailboxTests(unittest.TestCase):
             engine.gmail.send_message = send  # type: ignore[method-assign]
             session.finish_editor("", filled, 0)
             session.confirm_send()
-            self.assertEqual(session.prompt, "send")
+            self.assertIsNone(session.prompt)
+            self.assertEqual(session.notice, "sending")
+            self.assertEqual(len(session.compose_todo), 1)
+            urgent = UrgentWork(engine)
+            self.assertTrue(urgent.step(session))
             self.assertIn("couldn't check Sent", session.notice)
-            self.assertFalse(session._sending)
-            session.confirm_send()
             self.assertEqual(calls, [1])
-            self.assertEqual(session.prompt, "send")
-            engine.gmail.send_message = real_send  # type: ignore[method-assign]
+            self.assertEqual(len(session.compose_todo), 1)
+            # Still cooling down; do not post again until the backoff lifts.
+            self.assertFalse(urgent.take(session))
+            urgent._compose_after = 0
+            # A pending token looks in Sent first, so Offline does not POST again.
+            self.assertTrue(urgent.step(session))
+            self.assertEqual(calls, [1])
+            self.assertEqual(len(session.compose_todo), 1)
         finally:
             engine.store.close()
 
-    def test_rate_limited_send_is_not_offered_again(self) -> None:
+    def test_rate_limited_send_retries_in_the_background(self) -> None:
         gmail = FakeGmail()
         engine = Engine.open(self.tmp.name, gmail)
         try:
@@ -841,17 +866,21 @@ class MailboxTests(unittest.TestCase):
             )
             session.finish_editor("", filled, 0)
             session.confirm_send()
+            self.assertIsNone(session.prompt)
             self.assertEqual(gmail.sent, [])
-            self.assertEqual(session.prompt, "send")
-            self.assertIn("rateLimitExceeded", session.notice)
-            self.assertFalse(session._sending)
-            session.confirm_send()
+            self.assertEqual(session.notice, "sending")
+            urgent = UrgentWork(engine)
+            self.assertTrue(urgent.step(session))
+            self.assertEqual(gmail.sent, [])
+            self.assertTrue(session.compose_todo)
+            urgent._compose_after = 0
+            self.assertTrue(urgent.step(session))
             self.assertEqual(len(gmail.sent), 1)
             self.assertEqual(session.notice, "sent")
         finally:
             engine.store.close()
 
-    def test_a_rejected_send_is_not_offered_again(self) -> None:
+    def test_a_lost_send_retries_in_the_background(self) -> None:
         gmail = FakeGmail()
         engine = Engine.open(self.tmp.name, gmail)
 
@@ -874,11 +903,14 @@ class MailboxTests(unittest.TestCase):
             )
             session.finish_editor("", filled, 0)
             session.confirm_send()
+            self.assertIsNone(session.prompt)
             self.assertEqual(gmail.sent, [])
-            self.assertEqual(session.prompt, "send")
+            urgent = UrgentWork(engine)
+            self.assertTrue(urgent.step(session))
             self.assertIn("not in Sent", session.notice)
-            self.assertFalse(session._sending)
-            session.confirm_send()
+            self.assertEqual(len(session.compose_todo), 1)
+            urgent._compose_after = 0
+            self.assertTrue(urgent.step(session))
             self.assertEqual(len(gmail.sent), 1)
             self.assertEqual(session.notice, "sent")
         finally:
@@ -937,9 +969,48 @@ class MailboxTests(unittest.TestCase):
             self.assertTrue(session.begin_external_edit(launch=hold))
             self.assertFalse(session.begin_external_edit(launch=hold))
             self.assertEqual(session.notice, "already writing a message")
+            # Esc must not drop a live editor; otherwise a later wq is ignored.
+            self.assertTrue(session.refuse_external_escape())
+            self.assertEqual(session.notice, "still writing in another window")
+            self.assertIsNotNone(session.external)
+            self.assertFalse(session.begin_reply(everyone=False))
+            self.assertEqual(session.notice, "already writing a message")
+            self.assertIsNotNone(session.external)
             session.forget_external_edit()
             self.assertEqual(session.notice, "editor closed")
             self.assertIsNone(session.external)
+        finally:
+            engine.store.close()
+
+    def test_finishing_the_first_editor_still_offers_send_after_a_blocked_reply(self) -> None:
+        gmail = FakeGmail()
+        engine = Engine.open(self.tmp.name, gmail)
+        try:
+            session = MailSession(engine)
+            session.begin_compose()
+            session.compose_to = "ada@example.com"
+
+            def hold(draft, _done, _editor):
+                draft.write_text(
+                    "To: ada@example.com\nSubject: One\n\nfirst draft\n",
+                    encoding="utf-8",
+                )
+                return SimpleNamespace(poll=lambda: None)
+
+            self.assertTrue(session.begin_external_edit(launch=hold))
+            first = session.external
+            assert first is not None
+            self.assertTrue(session.refuse_external_escape())
+            self.assertIs(session.external, first)
+            self.assertFalse(session.begin_reply(everyone=False))
+            first.path.write_text(
+                "To: ada@example.com\nSubject: One\n\ncopied from the other letter\n",
+                encoding="utf-8",
+            )
+            first.sentinel.write_text("0", encoding="ascii")
+            self.assertTrue(session.poll_external_edit())
+            self.assertEqual(session.prompt, "send")
+            self.assertIn("copied from the other letter", "\n".join(session.compose_lines))
         finally:
             engine.store.close()
 
@@ -1344,7 +1415,7 @@ class MailboxTests(unittest.TestCase):
             self.assertIsNone(session.find_line)
             session.prompt_text = "here"
             session._apply_reader_find()
-            match = reader_match(session, geo.width - 2)
+            match = reader_match(session, geo.width)
             self.assertIsNotNone(match)
             assert match is not None
             self.assertEqual(match[1], len("Notes at link "))
@@ -1898,7 +1969,7 @@ class MailboxTests(unittest.TestCase):
             session._set_reader([words])
             session.reader_scroll = 0
             screen = render_lines(session, 24, 80)
-            width = geometry(24, 80).width - 2
+            width = geometry(24, 80).width
             self.assertGreater(len(session.reader_view), 1)
             self.assertTrue(all(_display_width(row) <= width for row in session.reader_view))
             first = next(line for line in screen if "word00" in line)
@@ -2527,13 +2598,15 @@ class MailboxTests(unittest.TestCase):
             geo = geometry(32, 100)
             lines = render_lines(session, 32, 100)
             header = lines[geo.list_h]
-            self.assertTrue(header.startswith("├"))
-            self.assertTrue(header.endswith("┤"))
+            self.assertTrue(header.startswith("└"))
+            self.assertTrue(header.endswith("┘"))
             self.assertEqual(header[geo.sidebar_w - 1], "┴")
             self.assertLess(header.index("Message"), geo.sidebar_w)
             body = lines[geo.list_h + 1]
-            self.assertTrue(body.startswith("│From:"))
-            self.assertNotEqual(body[geo.sidebar_w - 1], "│")
+            self.assertTrue(body.startswith("From:"))
+            self.assertFalse(body.startswith("│"))
+            self.assertNotEqual(body[0], "│")
+            self.assertNotEqual(body[-1], "│")
             self.assertNotIn("Inbox", body)
         finally:
             engine.store.close()
