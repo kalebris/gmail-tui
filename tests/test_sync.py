@@ -260,6 +260,25 @@ class SyncTests(unittest.TestCase):
         self.assertNotIn("listing Inbox 2/2", phases)
         self.assertFalse(any(phase.startswith("listing Inbox 1") and phase.endswith("/101") for phase in phases))
 
+    def test_inbox_listing_does_not_dirty_each_message(self) -> None:
+        for index in range(3):
+            self.fake.add(_inbox(f"more{index}", "body", 3_000 + index, f"More {index}"))
+        self.fake.page_size = 2
+        job = BackgroundSync(self.engine)
+        marks = 0
+        for _ in range(500):
+            if not job.step():
+                break
+            if not job.phase.startswith("listing Inbox"):
+                continue
+            if job.dirty:
+                marks += 1
+                job.dirty = False
+        # Four inbox messages. A refresh per metadata fetch would mark at
+        # least once each; page commits stay under that.
+        self.assertGreaterEqual(marks, 1)
+        self.assertLess(marks, 4)
+
     def test_all_mail_listing_leaves_the_open_list_alone(self) -> None:
         self.fake.reported_messages_total = 40
         job = BackgroundSync(self.engine)

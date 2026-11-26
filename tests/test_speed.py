@@ -19,6 +19,7 @@ from gmail_tui.gmail import IncomingMessage, Label, NullGmail
 from gmail_tui.links import present_links
 from gmail_tui.store import Store
 from gmail_tui.sync import BackgroundSync, Engine, UrgentWork
+from gmail_tui.tui import _service
 from gmail_tui.textutil import html_to_text
 from gmail_tui.ui import MailSession, _display_width, layout_reader, render_lines, wrap_lines
 
@@ -307,6 +308,84 @@ class ChangeSpeedTests(unittest.TestCase):
             self.assertTrue(session.label_todo)
             self.assertFalse(session.labels_stale)
             self.assertFalse(engine.store.has_pending_mutations())
+        finally:
+            engine.store.close()
+
+    def test_a_label_that_stays_does_not_write_on_the_key(self) -> None:
+        self._save(_message("m1", "t1", 1_000, "First", "body"), "body")
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            writes: list[str] = []
+            labels: list[str] = []
+            original_batch = Store.apply_local_labels_batch
+            original_labels = Store.list_label_info
+
+            def counting_batch(changes):
+                writes.append("batch")
+                return original_batch(engine.store, changes)
+
+            def counting_labels():
+                labels.append("labels")
+                return original_labels(engine.store)
+
+            engine.store.apply_local_labels_batch = counting_batch  # type: ignore[method-assign]
+            engine.store.list_label_info = counting_labels  # type: ignore[method-assign]
+            try:
+                session._change_selected(add=["STARRED"])
+                self.assertEqual(writes, [])
+                self.assertEqual(labels, [])
+                self.assertFalse(session.labels_stale)
+                self.assertTrue(session.label_todo)
+                self.assertIn("STARRED", session.messages[0].label_names)
+            finally:
+                del engine.store.apply_local_labels_batch
+                del engine.store.list_label_info
+        finally:
+            engine.store.close()
+
+    def test_finished_background_labels_do_not_recount_on_the_ui_thread(self) -> None:
+        self._save(_message("m1", "t1", 2_000, "First", "body"), "body")
+        self._save(_message("m2", "t2", 1_000, "Second", "body"), "body")
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine)
+            session.focus = "list"
+            session.delete_selected()
+            urgent = UrgentWork(engine)
+            self.assertTrue(urgent.take(session))
+            urgent.run()
+            # A push finishing in the same idle tick used to rebuild the folder.
+            urgent.dirty = True
+            labels: list[str] = []
+            threads: list[str] = []
+            original_labels = Store.list_label_info
+            original_threads = Store.list_mail_threads
+
+            def counting_labels():
+                labels.append("labels")
+                return original_labels(engine.store)
+
+            def counting_threads(*args, **kwargs):
+                threads.append("threads")
+                return original_threads(engine.store, *args, **kwargs)
+
+            engine.store.list_label_info = counting_labels  # type: ignore[method-assign]
+            engine.store.list_mail_threads = counting_threads  # type: ignore[method-assign]
+            try:
+                job = BackgroundSync(engine)
+                job.dirty = False
+                _service(session, job, urgent)
+                self.assertFalse(urgent.dirty)
+                self.assertTrue(session.labels_stale)
+                _service(session, job, urgent)
+                self.assertEqual(labels, [])
+                self.assertEqual(threads, [])
+                self.assertFalse(session.labels_stale)
+                self.assertEqual(session.messages[0].gmail_id, "m2")
+            finally:
+                del engine.store.list_label_info
+                del engine.store.list_mail_threads
         finally:
             engine.store.close()
 

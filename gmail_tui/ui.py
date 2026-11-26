@@ -28,11 +28,18 @@ from pathlib import Path
 
 from gmail_tui.accounts import Account
 from gmail_tui.gmail import GmailError, Offline
-from gmail_tui.labels import FlatLabel, TreeNode, build_label_tree, expandable_keys, flatten
+from gmail_tui.labels import (
+    SYSTEM_LABELS,
+    FlatLabel,
+    TreeNode,
+    build_label_tree,
+    expandable_keys,
+    flatten,
+)
 from gmail_tui.links import LABEL, jump_labels, link_spans, present_links, strip_link_urls
 from gmail_tui.search import parse_query
 from gmail_tui.snooze import SnoozeChoice, parse_duration, presets as snooze_presets
-from gmail_tui.store import HeldChange, MessagePreview, MessageSummary, ThreadCursor
+from gmail_tui.store import HeldChange, LabelInfo, MessagePreview, MessageSummary, ThreadCursor
 from gmail_tui.sixel import IMAGE_LIMIT, band_rows, image_band, is_bitmap
 from gmail_tui.textutil import (
     Attachment,
@@ -228,6 +235,9 @@ class MailSession:
         # account thread so d feels as light as x.
         self.label_todo: list[tuple[list[str], list[str], list[str]]] = []
         self._hidden: set[str] = set()
+        # Label ids applied on screen but not yet written. The prompt reads
+        # these so a second `l` sees the change before the account thread lands.
+        self._label_delta: dict[str, tuple[set[str], set[str]]] = {}
         self.inbox_count = 0
         self.inbox_unread = 0
         self._more = False
@@ -247,6 +257,7 @@ class MailSession:
         # file exists, so a later download can fill the reader alone.
         self._shown_body = ""
         self._label_tree_cache = None
+        self._label_info: list[LabelInfo] = []
         self.reload_labels()
         self._select_initial()
 
@@ -263,6 +274,35 @@ class MailSession:
         if self.visible:
             self.label_cursor = min(self.label_cursor, len(self.visible) - 1)
         self.inbox_count, self.inbox_unread = self.engine.store.inbox_counts()
+
+    def apply_label_info(
+        self,
+        info: list,
+        counts: tuple[int, int],
+        mailbox: tuple[int, int],
+    ) -> None:
+        """Install folder badges the account thread already counted."""
+        self._label_info = list(info)
+        cursor_id = self.current_label().gmail_id if self.visible else None
+        tree = build_label_tree(info)
+        if tree and tree[0].gmail_id == "":
+            tree[0].total, tree[0].unread = mailbox
+        self._label_tree_cache = tree
+        keys = expandable_keys(tree)
+        if not self._seen_labels:
+            self.expanded = set(keys)
+            self._seen_labels = True
+        else:
+            self.expanded &= keys
+        self.visible = flatten(tree, self.expanded)
+        if cursor_id is not None:
+            for index, item in enumerate(self.visible):
+                if item.gmail_id == cursor_id:
+                    self.label_cursor = index
+                    break
+        elif self.visible:
+            self.label_cursor = min(self.label_cursor, len(self.visible) - 1)
+        self.inbox_count, self.inbox_unread = counts
 
     def sync(self) -> None:
         try:
@@ -289,6 +329,11 @@ class MailSession:
         self.sync_total = job.total
         self.sync_tick = job.tick
         reader_ready = self._take_downloaded_body()
+        snapshot = getattr(job, "label_snapshot", None)
+        if snapshot is not None and not self.prompt:
+            job.label_snapshot = None
+            self.apply_label_info(*snapshot)
+            reader_ready = True
         if self.prompt or not job.dirty:
             return reader_ready
         now = time.monotonic()
@@ -338,7 +383,8 @@ class MailSession:
             kept_threads = self._mail_threads
             kept_cursor = self.message_cursor
             kept_row = kept_cursor - self.message_scroll
-            self.reload_labels()
+            # Recounting every label here scanned the whole mailbox on the UI
+            # thread whenever listing or a label push marked the view dirty.
             if label_id is not None:
                 for index, item in enumerate(self.visible):
                     if item.gmail_id == label_id:
@@ -742,34 +788,20 @@ class MailSession:
             [(gmail_id, tuple(add_labels), tuple(remove_labels)) for gmail_id in targets]
         )
         if self.search_text or not self._leaves_current_view(add_labels, remove_labels):
-            self.labels_stale = True
-            self.engine.store.apply_local_labels_batch(
-                [(gmail_id, add_labels, remove_labels) for gmail_id in targets]
-            )
-            self._reload_open_list(anchor, index)
+            # Stay on screen. The account thread writes; the row updates now.
+            self._retitle_rows(set(targets), add_labels, remove_labels)
+            self._touch_folder_counts(targets, add_labels, remove_labels)
+            for gmail_id in targets:
+                self._note_label_delta(gmail_id, add_labels, remove_labels)
+            self._queue_label_change(targets, add_labels, remove_labels)
             return
         # Leave the folder immediately; persist + push in the background.
         # Skip labels_stale here — a full folder recount on the next tick made
-        # d feel heavier than x. Counts refresh once the store write lands.
-        self._note_left_inbox(targets, remove_labels)
+        # d feel heavier than x. Badges move in memory with the row.
+        self._touch_folder_counts(targets, add_labels, remove_labels)
         self._hidden.update(targets)
-        self.label_todo.append((list(targets), add_labels, remove_labels))
+        self._queue_label_change(targets, add_labels, remove_labels)
         self._drop_acted(set(targets), index)
-
-    def _note_left_inbox(self, targets: list[str], remove_labels: list[str]) -> None:
-        """Adjust the tab badge without scanning every folder."""
-        if "INBOX" not in remove_labels or not targets:
-            return
-        gone = set(targets)
-        unread = 0
-        for item in self.messages:
-            ids = self._row_ids(item)
-            if not any(gmail_id in gone for gmail_id in ids):
-                continue
-            if item.unread:
-                unread += 1
-        self.inbox_count = max(0, self.inbox_count - len(targets))
-        self.inbox_unread = max(0, self.inbox_unread - unread)
 
     def flush_label_todo(self) -> bool:
         """Apply deferred archive/delete intents. True when anything was written."""
@@ -785,8 +817,149 @@ class MailSession:
                 done.add(gmail_id)
         self.engine.store.apply_local_labels_batch(changes)
         self._hidden -= done
+        for gmail_id in done:
+            self._label_delta.pop(gmail_id, None)
         self.labels_stale = True
         return True
+
+    def _queue_label_change(self, targets: list[str], add: list[str], remove: list[str]) -> None:
+        """Remember a label change. An add then a remove never becomes a push."""
+        pending: dict[str, tuple[set[str], set[str]]] = {}
+        order: list[str] = []
+
+        def ensure(gmail_id: str) -> tuple[set[str], set[str]]:
+            if gmail_id not in pending:
+                pending[gmail_id] = (set(), set())
+                order.append(gmail_id)
+            return pending[gmail_id]
+
+        for old_targets, old_add, old_remove in self.label_todo:
+            for gmail_id in old_targets:
+                added, removed = ensure(gmail_id)
+                added.update(old_add)
+                removed.update(old_remove)
+        for gmail_id in targets:
+            added, removed = ensure(gmail_id)
+            for label in add:
+                if label in removed:
+                    removed.discard(label)
+                else:
+                    added.add(label)
+            for label in remove:
+                if label in added:
+                    added.discard(label)
+                else:
+                    removed.add(label)
+        self.label_todo = [
+            ([gmail_id], list(added), list(removed))
+            for gmail_id in order
+            for added, removed in (pending[gmail_id],)
+            if added or removed
+        ]
+
+    def _note_label_delta(self, gmail_id: str, add: list[str], remove: list[str]) -> None:
+        added, removed = self._label_delta.get(gmail_id, (set(), set()))
+        added, removed = set(added), set(removed)
+        for label in add:
+            if label in removed:
+                removed.discard(label)
+            else:
+                added.add(label)
+        for label in remove:
+            if label in added:
+                added.discard(label)
+            else:
+                removed.add(label)
+        if added or removed:
+            self._label_delta[gmail_id] = (added, removed)
+        else:
+            self._label_delta.pop(gmail_id, None)
+
+    def _retitle_rows(self, ids: set[str], add: list[str], remove: list[str]) -> None:
+        add_names = [self._label_row_name(label) for label in add if label != "UNREAD"]
+        remove_names = {self._label_row_name(label) for label in remove if label != "UNREAD"}
+
+        def patch(item: MessageSummary) -> MessageSummary:
+            if item.gmail_id not in ids and not any(gmail_id in ids for gmail_id in item.member_ids):
+                return item
+            names = [name for name in item.label_names if name not in remove_names]
+            for name in add_names:
+                if name not in names:
+                    names.append(name)
+            return replace(item, label_names=tuple(sorted(names)))
+
+        self.messages = [patch(item) for item in self.messages]
+        self._mail_threads = [patch(item) for item in self._mail_threads]
+
+    def _label_row_name(self, gmail_id: str) -> str:
+        if gmail_id in {item[0] for item in SYSTEM_LABELS}:
+            return gmail_id
+        node = _find_label_node(self._label_tree_cache or [], gmail_id)
+        if node is None or not node.name:
+            return gmail_id
+        return node.name
+
+    def _touch_folder_counts(self, targets: list[str], add: list[str], remove: list[str]) -> None:
+        """Move folder badges by the rows just changed. No mailbox scan."""
+        ids = set(targets)
+        if not ids:
+            return
+        unread_ids: set[str] = set()
+        for item in self.messages:
+            if not item.unread:
+                continue
+            if item.gmail_id in ids:
+                unread_ids.add(item.gmail_id)
+            for gmail_id in item.member_ids:
+                if gmail_id in ids:
+                    unread_ids.add(gmail_id)
+        total = len(ids)
+        unread = len(unread_ids)
+        tree = self._label_tree_cache or []
+
+        def bump(gmail_id: str, total_delta: int, unread_delta: int) -> None:
+            node = _find_label_node(tree, gmail_id)
+            if node is None:
+                return
+            node.total = max(0, node.total + total_delta)
+            node.unread = max(0, node.unread + unread_delta)
+
+        for label in remove:
+            if label == "UNREAD":
+                bump("UNREAD", -total, -total)
+            else:
+                bump(label, -total, -unread)
+        for label in add:
+            if label == "UNREAD":
+                bump("UNREAD", total, total)
+            else:
+                bump(label, total, unread)
+        if "TRASH" in add:
+            bump("", -total, -unread)
+        if "TRASH" in remove:
+            bump("", total, unread)
+        if ("UNREAD" in add or "UNREAD" in remove) and "INBOX" not in add and "INBOX" not in remove:
+            sign = 1 if "UNREAD" in add else -1
+            inbox_rows = {
+                item.gmail_id
+                for item in self.messages
+                if "INBOX" in item.label_names
+                and (item.gmail_id in ids or any(gmail_id in ids for gmail_id in item.member_ids))
+            }
+            if inbox_rows:
+                bump("INBOX", 0, sign * len(inbox_rows))
+        if tree:
+            cursor_id = self.current_label().gmail_id if self.visible else None
+            self.visible = flatten(tree, self.expanded)
+            if cursor_id is not None:
+                for index, item in enumerate(self.visible):
+                    if item.gmail_id == cursor_id:
+                        self.label_cursor = index
+                        break
+        inbox = _find_label_node(tree, "INBOX")
+        if inbox is not None:
+            self.inbox_count = inbox.total
+            self.inbox_unread = inbox.unread
 
     def _strip_hidden(self) -> None:
         if not self._hidden:
@@ -873,23 +1046,39 @@ class MailSession:
         cursor_was_unread = any(item.gmail_id == cursor_id and item.unread for item in chosen)
         steps: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
         updates: dict[str, bool] = {}
+        mark_read: list[str] = []
+        mark_unread: list[str] = []
         for item in chosen:
             for gmail_id in self._row_ids(item):
                 if item.unread:
-                    self.engine.store.apply_local_labels(gmail_id, remove=["UNREAD"])
+                    mark_read.append(gmail_id)
                     steps.append((gmail_id, (), ("UNREAD",)))
                 else:
-                    self.engine.store.apply_local_labels(gmail_id, add=["UNREAD"])
+                    mark_unread.append(gmail_id)
                     steps.append((gmail_id, ("UNREAD",), ()))
                 updates[gmail_id] = not item.unread
+                self._note_label_delta(
+                    gmail_id,
+                    ["UNREAD"] if not item.unread else [],
+                    ["UNREAD"] if item.unread else [],
+                )
+        if mark_read:
+            self._queue_label_change(mark_read, [], ["UNREAD"])
+            self._touch_folder_counts(mark_read, [], ["UNREAD"])
+        if mark_unread:
+            self._queue_label_change(mark_unread, ["UNREAD"], [])
+            self._touch_folder_counts(mark_unread, ["UNREAD"], [])
         self._push_undo(steps)
-        self.messages = [
-            replace(item, unread=updates[item.gmail_id]) if item.gmail_id in updates else item
-            for item in self.messages
-        ]
-        if any(item.thread_role == "head" for item in self.messages):
-            self._refresh_thread_unread()
-        self.labels_stale = True
+
+        def unread_of(item: MessageSummary) -> bool:
+            if item.member_ids and all(gmail_id in updates for gmail_id in item.member_ids):
+                return any(updates[gmail_id] for gmail_id in item.member_ids)
+            if item.gmail_id in updates:
+                return updates[item.gmail_id]
+            return item.unread
+
+        self.messages = [replace(item, unread=unread_of(item)) for item in self.messages]
+        self._mail_threads = [replace(item, unread=unread_of(item)) for item in self._mail_threads]
         current = self.current_label()
         if current is not None and current.gmail_id == "UNREAD":
             removed = {gmail_id for gmail_id, unread in updates.items() if not unread}
@@ -923,6 +1112,7 @@ class MailSession:
         # Deferred deletes must hit the store before undo can reverse them.
         self.flush_label_todo()
         steps = self._undo.pop()
+        self._label_delta.clear()
         for gmail_id, added, removed in steps:
             self.engine.store.undo_labels(gmail_id, list(added), list(removed))
         self.notice = "undone"
@@ -2597,6 +2787,9 @@ class MailSession:
     def _refresh_label_prompt(self) -> None:
         current = self.messages[self.message_cursor].gmail_id if self.messages else ""
         already = self.engine.store.message_label_ids(current) if current else set()
+        delta = self._label_delta.get(current)
+        if delta:
+            already = (set(already) - delta[1]) | delta[0]
         catalog = self._all_labels()
         query = self.prompt_text.strip()
         ranked = _rank_labels(catalog, query, require_id=True)
@@ -2629,6 +2822,7 @@ class MailSession:
         chosen = self.completions[self.prompt_cursor]
         if chosen.create_name:
             gmail_id = self.engine.store.create_user_label(chosen.create_name)
+            self._remember_created_label(gmail_id, chosen.create_name)
         else:
             gmail_id = chosen.gmail_id or ""
         if not gmail_id:
@@ -2764,11 +2958,23 @@ class MailSession:
         cached = getattr(self, "_label_tree_cache", None)
         if cached is not None:
             return cached
-        tree = build_label_tree(self.engine.store.list_label_info())
+        info = self.engine.store.list_label_info()
+        self._label_info = info
+        tree = build_label_tree(info)
         if tree and tree[0].gmail_id == "":
             tree[0].total, tree[0].unread = self.engine.store.mailbox_counts()
         self._label_tree_cache = tree
         return tree
+
+    def _remember_created_label(self, gmail_id: str, name: str) -> None:
+        """Show a label created from the prompt without scanning every message."""
+        info = list(self._label_info)
+        if any(item.gmail_id == gmail_id for item in info):
+            return
+        info.append(LabelInfo(gmail_id, name, "user", 0, 0))
+        all_mail = _find_label_node(self._label_tree_cache or [], "")
+        mailbox = (all_mail.total, all_mail.unread) if all_mail is not None else (0, 0)
+        self.apply_label_info(info, (self.inbox_count, self.inbox_unread), mailbox)
 
     def _all_labels(self) -> list[FlatLabel]:
         tree = self._label_tree()
@@ -2904,7 +3110,7 @@ class MailSession:
         label = None if current.gmail_id == "" else current.gmail_id
         extra = self.engine.store.list_mail_threads(
             label,
-            ThreadCursor(last.internal_date_ms, last.thread_id),
+            ThreadCursor(last.sort_ms or last.internal_date_ms, last.thread_id),
             PAGE,
             newest_first=self.newest_first,
         )
@@ -4625,6 +4831,16 @@ def _label_score(item: FlatLabel, query: str) -> int | None:
         return 1
     if needle in title or needle in name or needle in path:
         return 2
+    return None
+
+
+def _find_label_node(nodes: list[TreeNode], gmail_id: str) -> TreeNode | None:
+    for node in nodes:
+        if node.gmail_id == gmail_id:
+            return node
+        found = _find_label_node(node.children, gmail_id)
+        if found is not None:
+            return found
     return None
 
 

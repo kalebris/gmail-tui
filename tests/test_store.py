@@ -73,6 +73,20 @@ class StoreTests(unittest.TestCase):
         paged = self.store.explain_list("INBOX", cursor)
         self.assertIn("thread_labels_list", paged)
 
+    def test_the_open_folder_uses_the_label_index(self) -> None:
+        self.store.upsert_metadata(_message("m1", "t1", 1000, "old", ["INBOX"]), "missing")
+        self.store.upsert_metadata(_message("m2", "t2", 3000, "new", ["INBOX"]), "missing")
+        plan = self.store.explain_mail_threads("INBOX")
+        self.assertIn("thread_labels_list", plan)
+        self.assertNotIn("MAX", plan)
+        page = self.store.list_mail_threads("INBOX", limit=1)
+        self.assertEqual(page[0].subject, "new")
+        cursor = ThreadCursor(page[0].sort_ms, page[0].thread_id)
+        rest = self.store.list_mail_threads("INBOX", cursor, limit=1)
+        self.assertEqual(rest[0].subject, "old")
+        whole = self.store.explain_mail_threads(None)
+        self.assertIn("threads_recent", whole)
+
     def test_equal_dates_are_ordered_by_thread_id(self) -> None:
         self.store.upsert_metadata(_message("m1", "t1", 5000, "first", ["INBOX"]), "missing")
         self.store.upsert_metadata(_message("m2", "t2", 5000, "second", ["INBOX"]), "missing")

@@ -38,6 +38,9 @@ CREATE TABLE threads (
   label_ids_csv TEXT NOT NULL DEFAULT ''
 );
 
+CREATE INDEX threads_recent
+  ON threads(latest_internal_date DESC, id DESC);
+
 CREATE TABLE messages (
   id INTEGER PRIMARY KEY,
   thread_id INTEGER NOT NULL REFERENCES threads(id),

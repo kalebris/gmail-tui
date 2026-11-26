@@ -1051,21 +1051,24 @@ def _status_stamp(session: MailSession) -> tuple:
 
 
 def _service(session: MailSession, job: BackgroundSync, urgent: UrgentWork) -> bool:
-    """Record finished Gmail work. The call itself runs on the account thread.
+    """Record finished background work. This runs on the UI thread.
 
-    The result is true when the screen should be drawn again.
+    The result is true when the screen should be drawn again. It must not
+    recount folders or rebuild the open list for a label change.
     """
     changed = False
     if session.labels_stale and not session.prompt:
+        # The row and the badges already moved when the key ran. Recounting
+        # here scanned every message on the UI thread after each archive.
         session.labels_stale = False
-        session.reload_labels()
         changed = True
     applied = urgent.apply(session)
     session.urgent_phase = urgent.phase if urgent.paused or urgent.phase else ""
     if applied and urgent.dirty:
+        # A finished label push does not rebuild the open folder. New mail
+        # still arrives through the sync job.
         urgent.dirty = False
-        session.refresh_view()
-        return True
+        changed = True
     before = (session.notice, session.urgent_phase)
     was_dirty = job.dirty
     reader_ready = session.observe(job)

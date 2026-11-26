@@ -101,6 +101,9 @@ class MessageSummary:
     expanded: bool = False
     row_key: str = ""
     member_ids: tuple[str, ...] = ()
+    # Date the folder query ordered by. Paging must use this, not the newest
+    # message's date, when those two differ.
+    sort_ms: int = 0
     message_id_header: str = ""
     in_reply_to: str = ""
     references_header: str = ""
@@ -224,7 +227,7 @@ class Store:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version == 0:
             conn.executescript(_SCHEMA)
-            conn.execute("PRAGMA user_version=10")
+            conn.execute("PRAGMA user_version=11")
         elif version < 10:
             if version < 2:
                 columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
@@ -294,6 +297,14 @@ class Store:
                     "ALTER TABLE sent_mail ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 1"
                 )
             conn.execute("PRAGMA user_version=10")
+        if 0 < version < 11:
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS threads_recent
+                  ON threads(latest_internal_date DESC, id DESC)
+                """
+            )
+            conn.execute("PRAGMA user_version=11")
         store = cls(path, conn)
         store.replay_pending()
         return store
@@ -842,6 +853,7 @@ class Store:
                     thread_role="head" if count > 1 else "",
                     row_key=f"t:{row['thread_id']}" if count > 1 else newest["gmail_id"],
                     member_ids=tuple(str(item["gmail_id"]) for item in acted) if count > 1 else (),
+                    sort_ms=int(row["sort_date"] or 0),
                 )
             )
         return summaries
@@ -865,42 +877,82 @@ class Store:
         newest_first: bool,
         hide_trash: bool,
     ) -> list[sqlite3.Row]:
-        visible = f"NOT {self._label_exists('m', 'TRASH')}" if hide_trash else "1"
-        sort_expr = f"""(
-            SELECT MAX(m.internal_date) FROM messages m
-            WHERE m.thread_id = t.id AND {visible}
-        )"""
+        sql, params = self._mail_thread_sql(label, cursor, limit, newest_first, hide_trash)
+        if sql is None:
+            return []
+        return list(self.conn.execute(sql, params))
+
+    def explain_mail_threads(self, label: str | None, cursor: ThreadCursor | None = None) -> str:
+        sql, params = self._mail_thread_sql(label, cursor, 100, True, label != "TRASH")
+        if sql is None:
+            return ""
+        rows = self.conn.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()
+        return " ".join(" ".join(str(cell) for cell in row) for row in rows)
+
+    def _mail_thread_sql(
+        self,
+        label: str | None,
+        cursor: ThreadCursor | None,
+        limit: int,
+        newest_first: bool,
+        hide_trash: bool,
+    ) -> tuple[str | None, list[object]]:
+        """One index walk for a page.
+
+        ``thread_labels.latest_internal_date`` is kept when a thread is rebuilt,
+        so the folder can be ordered from ``thread_labels_list`` instead of
+        computing MAX(internal_date) for every conversation. All mail uses
+        ``threads_recent`` the same way.
+        """
         compare = "<" if newest_first else ">"
         direction = "DESC" if newest_first else "ASC"
         params: list[object] = []
         if label:
             label_id = self._label_pk_read(label)
             if label_id is None:
-                return []
+                return None, []
+            date = "tl.latest_internal_date"
             sql = f"""
-                SELECT t.id AS thread_id, {sort_expr} AS sort_date
+                SELECT tl.thread_id AS thread_id, {date} AS sort_date
                 FROM thread_labels tl
-                JOIN threads t ON t.id = tl.thread_id
                 WHERE tl.label_id = ?
-                AND EXISTS (
-                  SELECT 1 FROM messages m
-                  JOIN message_labels ml ON ml.message_id = m.id AND ml.label_id = tl.label_id
-                  WHERE m.thread_id = t.id AND {visible}
-                )
             """
             params.append(label_id)
+            if hide_trash:
+                sql += f"""
+                    AND EXISTS (
+                      SELECT 1 FROM messages m
+                      JOIN message_labels ml
+                        ON ml.message_id = m.id AND ml.label_id = tl.label_id
+                      WHERE m.thread_id = tl.thread_id
+                        AND NOT {self._label_exists("m", "TRASH")}
+                    )
+                """
+            if cursor is not None:
+                sql += f" AND ({date}, tl.thread_id) {compare} (?, ?)"
+                params.extend([cursor.latest_internal_date_ms, cursor.thread_id])
+            sql += f" ORDER BY {date} {direction}, tl.thread_id {direction} LIMIT ?"
         else:
+            date = "t.latest_internal_date"
             sql = f"""
-                SELECT t.id AS thread_id, {sort_expr} AS sort_date
+                SELECT t.id AS thread_id, {date} AS sort_date
                 FROM threads t
-                WHERE {sort_expr} IS NOT NULL
+                WHERE {date} > 0
             """
-        if cursor is not None:
-            sql += f" AND ({sort_expr}, t.id) {compare} (?, ?)"
-            params.extend([cursor.latest_internal_date_ms, cursor.thread_id])
-        sql += f" ORDER BY {sort_expr} {direction}, t.id {direction} LIMIT ?"
+            if hide_trash:
+                sql += f"""
+                    AND EXISTS (
+                      SELECT 1 FROM messages m
+                      WHERE m.thread_id = t.id
+                        AND NOT {self._label_exists("m", "TRASH")}
+                    )
+                """
+            if cursor is not None:
+                sql += f" AND ({date}, t.id) {compare} (?, ?)"
+                params.extend([cursor.latest_internal_date_ms, cursor.thread_id])
+            sql += f" ORDER BY {date} {direction}, t.id {direction} LIMIT ?"
         params.append(limit)
-        return list(self.conn.execute(sql, params))
+        return sql, params
 
     def _member_rows(self, thread_ids: list[int]) -> dict[int, list[dict[str, object]]]:
         if not thread_ids:

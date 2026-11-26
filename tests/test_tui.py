@@ -2738,6 +2738,7 @@ class MailboxTests(unittest.TestCase):
             self.assertGreater(dialog.index("┌ Label "), geometry(32, 100).sidebar_w)
             self.assertGreater(session.popup[1], geometry(32, 100).sidebar_w)
             session.prompt_accept()
+            session.flush_label_todo()
             pending = engine.store.pending_changes()
             self.assertEqual([(item.op, item.label) for item in pending], [("add", "Work/Clients")])
             self.assertIn("Label_2", engine.store.message_label_ids("m1"))
@@ -2752,6 +2753,7 @@ class MailboxTests(unittest.TestCase):
             self.assertIn("enter applies", shown)
             session.prompt_cursor = session.completions.index(remove)
             session.prompt_accept()
+            session.flush_label_todo()
             self.assertNotIn("Label_2", engine.store.message_label_ids("m1"))
             pending = [(item.op, item.label) for item in engine.store.pending_changes()]
             self.assertNotIn(("add", "Work/Clients"), pending)
@@ -2765,6 +2767,7 @@ class MailboxTests(unittest.TestCase):
             self.assertGreater(session.popup[0], 1)
             self.assertGreater(session.popup[1], 8)
             session.prompt_accept()
+            session.flush_label_todo()
             pending = engine.store.pending_changes()
             self.assertIn(("add", "Holiday"), [(item.op, item.label) for item in pending])
             self.assertEqual(
@@ -2966,6 +2969,7 @@ class MailboxTests(unittest.TestCase):
                 index for index, item in enumerate(session.completions) if item.gmail_id == "Label_1"
             )
             session.prompt_accept()
+            session.flush_label_todo()
             added = {
                 item.gmail_id
                 for item in engine.store.pending_changes()

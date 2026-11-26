@@ -987,8 +987,12 @@ class UrgentWork:
                 hidden = getattr(session, "_hidden", None)
                 if isinstance(hidden, set):
                     hidden -= item[1]
-                # Folder counts waited for this write; refresh them off the key.
+                # The screen already moved the row. Do not ask it to recount.
                 session.labels_stale = True
+                delta = getattr(session, "_label_delta", None)
+                if isinstance(delta, dict):
+                    for gmail_id in item[1]:
+                        delta.pop(gmail_id, None)
                 continue
             if kind in {"error", "offline"}:
                 # Offline after sleep is transient; keep the next open/push armed.
@@ -1051,6 +1055,7 @@ class BackgroundSync:
         self.total = 0
         self.tick = 0
         self.dirty = False
+        self.label_snapshot = None
         self._step_lock = threading.Lock()
         self._list_items: list | None = None
         self._list_index = 0
@@ -1447,6 +1452,12 @@ class BackgroundSync:
             self.done = 0
             self.total = 0
             self.engine._refresh_labels()
+            # Count folders here. The UI only swaps in the snapshot.
+            self.label_snapshot = (
+                self.engine.store.list_label_info(),
+                self.engine.store.inbox_counts(),
+                self.engine.store.mailbox_counts(),
+            )
             self.dirty = True
             self._enter_after_labels()
         elif self.mode == "bootstrap":
@@ -1568,11 +1579,11 @@ class BackgroundSync:
                     if _wants_body_now(message, label, store.open_label())
                     else "missing"
                 )
-                # Inbox rows show up as they arrive. The rest of the mailbox
-                # is written with the page, and does not rebuild the open list.
+                # Stage inbox rows so the page can show them, but do not mark the
+                # open list dirty per message. That rebuilt the folder on the
+                # UI thread for the whole listing.
                 if label is not None:
                     store.stage_message(message, schedule)
-                    self.dirty = True
                 self._list_batch.append((message, schedule))
             return True
         if store.label_epoch != self._list_epoch:
@@ -1702,11 +1713,11 @@ class BackgroundSync:
             self._inbox_scan = 0
         self.phase = "updating inbox"
         nxt = store.retain_inbox(self._inbox_seen, self._inbox_scan)
-        self.dirty = True
         if nxt is not None:
             self._inbox_scan = nxt
             return
         self._inbox_scan = None
+        self.dirty = True
         if store.bootstrap_phase() == "inbox":
             store.advance_phase("all")
             self._reset_list()
