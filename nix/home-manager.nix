@@ -55,16 +55,32 @@ let
         ++ extraLines
       )
       + "\n";
+  profileHasOverlay =
+    profile:
+    profile.open != null || profile.signature != null || profile.signatures != { };
+  profileOverlayText =
+    name: profile:
+    let
+      lines =
+        [
+          "# Managed by Home Manager (programs.gmail-tui.profiles.${name})."
+        ]
+        ++ lib.optionals (profile.open != null) [
+          "# Links and HTML parts. Attachments and other files stay on xdg-open."
+          "open ${command profile.open}"
+        ]
+        ++ lib.optional (profile.signature != null) "signature ${profile.signature}"
+        ++ lib.mapAttrsToList (
+          email: path: "signature ${email} ${path}"
+        ) profile.signatures;
+    in
+    lib.concatStringsSep "\n" lines + "\n";
   profileFiles = lib.mapAttrs' (
     name: profile:
     lib.nameValuePair "gmail-tui/profiles/${name}" {
-      text = ''
-        # Managed by Home Manager (programs.gmail-tui.profiles.${name}.open).
-        # Links and HTML parts. Attachments and other files stay on xdg-open.
-        open ${command profile.open}
-      '';
+      text = profileOverlayText name profile;
     }
-  ) (lib.filterAttrs (_: profile: profile.open != null) cfg.profiles);
+  ) (lib.filterAttrs (_: profileHasOverlay) cfg.profiles);
   emptyOpens =
     lib.optional (cfg.settings.open == [ ]) "programs.gmail-tui.settings.open needs a command"
     ++ lib.concatLists (
@@ -191,8 +207,27 @@ in
             default = null;
             example = "~/.config/gmail-tui/signature";
             description = ''
-              Path to a signature file. Its text is inserted into a new message
-              or a reply, above any quoted text. Null leaves the line out.
+              Default signature file for every account. Its text is inserted into
+              a new message or a reply, above any quoted text. Per-account paths
+              go in <option>programs.gmail-tui.settings.signatures</option>.
+              A profile may override both. Null leaves the line out.
+            '';
+          };
+
+          signatures = lib.mkOption {
+            type = lib.types.attrsOf lib.types.str;
+            default = { };
+            example = lib.literalExpression ''
+              {
+                "ada@example.com" = "~/.config/gmail-tui/signature-ada";
+                "bea@example.com" = "~/.config/gmail-tui/signature-bea";
+              }
+            '';
+            description = ''
+              Signature file per mailbox address. Written as
+              <literal>signature user@host PATH</literal> lines. An address here
+              beats <option>programs.gmail-tui.settings.signature</option> for
+              that account; a profile's matching line beats both.
             '';
           };
 
@@ -254,27 +289,59 @@ in
       type = lib.types.coercedTo (lib.types.listOf lib.types.str) (
         names: lib.genAttrs names (_: { })
       ) (lib.types.attrsOf (lib.types.submodule ({ name, ... }: {
-        options.open = lib.mkOption {
-          type = lib.types.nullOr (lib.types.listOf lib.types.str);
-          default = null;
-          description = ''
-            Command that opens a link or an HTML part for the <literal>${name}</literal> profile.
-            The URL or file is appended. Written to
-            <filename>~/.config/gmail-tui/profiles/${name}</filename>, which
-            overrides <option>programs.gmail-tui.settings.open</option>.
-            Attachments and other files stay on <command>xdg-open</command>.
-          '';
-          example = [
-            "firefox"
-            "-P"
-            "settings"
-          ];
+        options = {
+          open = lib.mkOption {
+            type = lib.types.nullOr (lib.types.listOf lib.types.str);
+            default = null;
+            description = ''
+              Command that opens a link or an HTML part for the <literal>${name}</literal> profile.
+              The URL or file is appended. Written to
+              <filename>~/.config/gmail-tui/profiles/${name}</filename>, which
+              overrides <option>programs.gmail-tui.settings.open</option>.
+              Attachments and other files stay on <command>xdg-open</command>.
+            '';
+            example = [
+              "firefox"
+              "-P"
+              "settings"
+            ];
+          };
+
+          signature = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            example = "~/.config/gmail-tui/signature-work";
+            description = ''
+              Default signature file for the <literal>${name}</literal> profile.
+              Beats shared <option>programs.gmail-tui.settings.signature</option>
+              and shared per-account lines when this profile is active.
+            '';
+          };
+
+          signatures = lib.mkOption {
+            type = lib.types.attrsOf lib.types.str;
+            default = { };
+            example = lib.literalExpression ''
+              {
+                "ada@work.example" = "~/.config/gmail-tui/sig-work-ada";
+              }
+            '';
+            description = ''
+              Per-account signature files for the <literal>${name}</literal>
+              profile. An address here beats the profile default and every
+              shared signature line.
+            '';
+          };
         };
       })));
       default = { };
       example = lib.literalExpression ''
         {
-          work.open = [ "firefox" "-P" "settings" ];
+          work = {
+            open = [ "firefox" "-P" "settings" ];
+            signature = "~/.config/gmail-tui/signature-work";
+            signatures."ada@work.example" = "~/.config/gmail-tui/sig-work-ada";
+          };
           home.open = [ "firefox" "-P" "personal" ];
         }
       '';
@@ -283,8 +350,9 @@ in
         (or the default store). For each name, installs
         <command>gmail-tui-&lt;name&gt;</command> on <envar>PATH</envar> as a
         wrapper around <command>gmail-tui --profile &lt;name&gt;</command>.
-        <literal>open</literal> is the link command for that profile.
-        A list of names is still accepted and means no per-profile link command:
+        <literal>open</literal> and <literal>signature(s)</literal> are written
+        to that profile's overlay file. A list of names is still accepted and
+        means no per-profile overlay:
 
         <literal>[ "work" "home" ]</literal>
       '';

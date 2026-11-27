@@ -11,6 +11,11 @@ let
       [ "on-demand none" ]
     else
       map (label: "on-demand ${label}") settings.onDemand;
+  signatureLines =
+    lib.optional (settings.signature != null) "signature ${settings.signature}"
+    ++ lib.mapAttrsToList (
+      email: path: "signature ${email} ${path}"
+    ) (settings.signatures or { });
   lines = lib.filter (line: line != "") (
     [
       (lib.optionalString (settings.download != null) "download ${settings.download}")
@@ -26,7 +31,7 @@ let
       (lib.optionalString (settings.oauthTpmIdentity != null) "oauth-tpm-identity ${settings.oauthTpmIdentity}")
     ]
     ++ onDemand
-    ++ lib.optional (settings.signature != null) "signature ${settings.signature}"
+    ++ signatureLines
     ++ lib.optional (settings.open != null) "open ${command settings.open}"
   );
 in

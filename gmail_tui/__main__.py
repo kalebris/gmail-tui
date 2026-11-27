@@ -141,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             download=settings.download,
             settings_path=settings_file,
             open_command=opener,
+            profile=profile_name,
         )
     except (GmailError, MessageNotFound, ValueError, OAuthError) as exc:
         print(exc, file=sys.stderr)
@@ -190,6 +191,7 @@ def _run(
     download: Path | None = None,
     settings_path: Path | None = None,
     open_command: tuple[str, ...] = ("xdg-open",),
+    profile: str | None = None,
 ) -> int:
     if args.command == "login":
         return _login(args, data)
@@ -205,6 +207,7 @@ def _run(
             download_dir=download,
             settings_path=settings_path,
             open_command=open_command,
+            profile=profile,
         )
         return 0
     settings = load_settings(settings_path) if settings_path is not None else None

@@ -35,9 +35,10 @@ time %H:%M
 datetime %Y-%m-%d %H:%M
 weekday %a %d
 # signature ~/.config/gmail-tui/signature
+# signature ada@gmail.com ~/.config/gmail-tui/signature-ada
 ```
 
-`signature` is a file. Its text is placed in a new message, and in a reply above the quoted original. The file is read when the editor opens.
+`signature` is a file. Its text is placed in a new message, and in a reply above the quoted original. The file is read when the editor opens. A bare path is the default for every account; `signature user@host PATH` sets that mailbox only. `~/.config/gmail-tui/profiles/<name>` (beside `config`) may set the same lines for `--profile <name>`. Lookup order: profile account → profile default → shared account → shared default.
 
 Links and HTML parts open with `xdg-open`. Set `open` to use another program; the URL or HTML file is added as the last argument:
 
@@ -45,7 +46,7 @@ Links and HTML parts open with `xdg-open`. Set `open` to use another program; th
 open firefox -P settings
 ```
 
-That line applies to every profile. `~/.config/gmail-tui/profiles/work` (same folder as `config`, one file per `--profile` name) overrides it for that profile and contains only an `open` line. Home Manager writes both from `programs.gmail-tui.settings` and `programs.gmail-tui.profiles.<name>.open`. The word `link` stays an OSC 8 hyperlink, so the terminal's URL mode can list it (foot: Ctrl+Shift+O). `O` opens the next link with the `open` command. Ctrl+O does the same job inside gmail-tui: each visible `link` gets a jump label, and the letter you press opens that address with the `open` command. A click on that word uses the command when it is not `xdg-open`. HTML parts use the same command. Saved attachments stay on `xdg-open`.
+That line applies to every profile. The same `profiles/<name>` file overrides `open` and `signature` for that profile. Home Manager writes both from `programs.gmail-tui.settings` and `programs.gmail-tui.profiles.<name>`. The word `link` stays an OSC 8 hyperlink, so the terminal's URL mode can list it (foot: Ctrl+Shift+O). `O` opens the next link with the `open` command. Ctrl+O does the same job inside gmail-tui: each visible `link` gets a jump label, and the letter you press opens that address with the `open` command. A click on that word uses the command when it is not `xdg-open`. HTML parts use the same command. Saved attachments stay on `xdg-open`.
 
 If you previously used `gtui`, move or symlink the old dirs:
 
@@ -152,13 +153,18 @@ use the system `pkgs`, e.g. `useGlobalPkgs = false`).
       # download = "~/Downloads";
       # open = [ "xdg-open" ];
       # signature = "~/.config/gmail-tui/signature";
+      # signatures."ada@example.com" = "~/.config/gmail-tui/signature-ada";
     };
 
     # PATH wrappers: gmail-tui-work / gmail-tui-home.
-    # open is that profile's link command (profiles/<name> next to the config).
+    # open / signature(s) write profiles/<name> next to the config.
     # A list of names still works: profiles = [ "work" "home" ];
     profiles = {
-      work.open = [ "firefox" "-P" "settings" ];
+      work = {
+        open = [ "firefox" "-P" "settings" ];
+        # signature = "~/.config/gmail-tui/signature-work";
+        # signatures."ada@work.example" = "~/.config/gmail-tui/sig-work-ada";
+      };
       home = { };
     };
 
@@ -403,7 +409,7 @@ snooze, inbox, help.
 | `O` | open the next link (`open` in the config, or `xdg-open`) |
 | `a`/`e`, `b`, `d`, `l`, `u`, `n`, `U`, `H` | archive, snooze, delete, label, unread, undo, holding |
 
-`c` opens a To, Cc, and Bcc dialog first. Tab completes the address being typed from the From and To headers of mail already stored. Enter then opens `$EDITOR` in a new terminal (`GMAIL_TUI_TERMINAL` is that command; otherwise kitty, foot, alacritty, and the other common terminals). `r` and `R` open the editor directly. A `signature` file from the config is already in the draft, above any quoted text. This window keeps running, so other mail can be read while the message is written. When the editor exits, a dialog offers Send or Save as draft. Drag with the mouse to highlight text; the selection is copied.
+`c` opens a To, Cc, and Bcc dialog first. Tab completes the address being typed from the From and To headers of mail already stored. Enter then opens `$EDITOR` in a new terminal (`GMAIL_TUI_TERMINAL` is that command; otherwise kitty, foot, alacritty, and the other common terminals). `r` and `R` open the editor directly. The signature file for the active profile and account is already in the draft, above any quoted text. This window keeps running, so other mail can be read while the message is written. When the editor exits, a dialog offers Send or Save as draft. Drag with the mouse to highlight text; the selection is copied.
 
 **Calendar** (`C`)
 

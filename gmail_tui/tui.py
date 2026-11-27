@@ -18,7 +18,13 @@ from gmail_tui.accounts import Account, arrange, discover
 from gmail_tui.gmail import NullGmail
 from gmail_tui.http_gmail import HttpGmail
 from gmail_tui.keys import ALT, KeyMap, KeysError, config_path, defaults, load
-from gmail_tui.settings import SettingsError, default_download, load as load_settings
+from gmail_tui.settings import (
+    SettingsError,
+    config_path as settings_config_path,
+    default_download,
+    load as load_settings,
+    resolve_signature,
+)
 from gmail_tui.links import osc8
 from gmail_tui.oauth import OAuthError, current_access_token
 from gmail_tui.quota import SyncStopped
@@ -237,6 +243,7 @@ def run_tui(
     download_dir: Path | None = None,
     settings_path=None,
     open_command: tuple[str, ...] = ("xdg-open",),
+    profile: str | None = None,
 ) -> None:
     locale.setlocale(locale.LC_ALL, "")
     notice = ""
@@ -282,13 +289,19 @@ def run_tui(
             supported, cell = probe_terminal()
         except Exception:
             supported, cell = False, (8, 16)
-        for slot in jobs:
+        settings_file = (
+            Path(settings_path) if settings_path is not None else settings_config_path()
+        )
+        for tab, slot in zip(accounts, jobs):
             slot.session.sixel = supported
             slot.session.sixel_cell = cell
             slot.session.download_dir = downloads
             slot.session.open_command = open_command
             if user is not None:
-                slot.session.signature_path = user.signature
+                email = slot.engine.store.account_email() or tab.name
+                slot.session.signature_path = resolve_signature(
+                    user, settings_file, profile, email
+                )
         images = _SixelPump(desk)
         global _images
         _images = images

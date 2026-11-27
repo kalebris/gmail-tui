@@ -18,10 +18,12 @@ from gmail_tui.settings import (
     load,
     normalize_profile,
     parse,
+    parse_profile,
     parse_profile_open,
     resolve_config_path,
     resolve_data_dir,
     resolve_open_command,
+    resolve_signature,
     xdg_config_home,
     xdg_data_home,
 )
@@ -109,6 +111,69 @@ class SettingsTests(unittest.TestCase):
     def test_signature_is_a_path(self) -> None:
         self.assertIsNone(parse("").signature)
         self.assertEqual(parse("signature ~/mail/signature\n").signature, Path.home() / "mail" / "signature")
+
+    def test_signature_may_name_one_account(self) -> None:
+        settings = parse(
+            "signature ~/mail/default\n"
+            "signature Ada@Example.com ~/mail/ada\n"
+            "signature bea@example.com ~/mail/bea\n"
+            "signature ada@example.com ~/mail/ada2\n"
+        )
+        self.assertEqual(settings.signature, Path.home() / "mail" / "default")
+        self.assertEqual(
+            settings.signatures,
+            (
+                ("Ada@Example.com", Path.home() / "mail" / "ada"),
+                ("bea@example.com", Path.home() / "mail" / "bea"),
+                ("ada@example.com", Path.home() / "mail" / "ada2"),
+            ),
+        )
+        with self.assertRaises(SettingsError):
+            parse("signature\n")
+
+    def test_resolve_signature_is_per_profile_per_account(self) -> None:
+        shared = parse(
+            "signature /shared/default\n"
+            "signature ada@example.com /shared/ada\n"
+            "signature bea@example.com /shared/bea\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config"
+            config.write_text("signature /shared/default\n", encoding="utf-8")
+            self.assertEqual(
+                resolve_signature(shared, config, None, "ada@example.com"),
+                Path("/shared/ada"),
+            )
+            self.assertEqual(
+                resolve_signature(shared, config, None, "other@example.com"),
+                Path("/shared/default"),
+            )
+            profile = root / "profiles" / "work"
+            profile.parent.mkdir()
+            profile.write_text(
+                "signature /work/default\n"
+                "signature ADA@example.com /work/ada\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                resolve_signature(shared, config, "work", "ada@example.com"),
+                Path("/work/ada"),
+            )
+            self.assertEqual(
+                resolve_signature(shared, config, "work", "bea@example.com"),
+                Path("/work/default"),
+            )
+            self.assertEqual(
+                resolve_signature(shared, config, "home", "bea@example.com"),
+                Path("/shared/bea"),
+            )
+            overlay = parse_profile(
+                "open firefox\nsignature /p/default\nsignature x@y.z /p/x\n"
+            )
+            self.assertEqual(overlay.open_command, ("firefox",))
+            self.assertEqual(overlay.signature, Path("/p/default"))
+            self.assertEqual(overlay.signatures, (("x@y.z", Path("/p/x")),))
 
     def test_open_command_defaults_to_xdg_open_and_parses_argv(self) -> None:
         self.assertEqual(parse("").open_command, ("xdg-open",))

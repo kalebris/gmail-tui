@@ -7,8 +7,9 @@ to ``$XDG_DATA_HOME/gmail-tui/`` (``~/.local/share/gmail-tui/``) so an installed
 ``download`` is where saved attachments and xdg-open copies go.
 ``open`` is the program for a link or an HTML part (the target is appended).
 ``signature`` is a file inserted into new messages and replies, above any quote.
-A ``profiles/<name>`` file beside the config overrides ``open`` for
-``--profile <name>``.
+``signature user@host PATH`` sets that file for one account. A
+``profiles/<name>`` file beside the config overrides ``open`` and ``signature``
+for ``--profile <name>`` (profile account lines beat the shared ones).
 ``account`` lines, one address each, set the left-to-right order of the top bar.
 ``date`` / ``time`` / ``datetime`` / ``weekday`` are strftime patterns for stamps.
 """
@@ -47,8 +48,19 @@ class Settings:
     on_demand: tuple[str, ...] = DEFAULT_ON_DEMAND
     # Program for a link or an HTML part. The URL or file is appended.
     open_command: tuple[str, ...] = ("xdg-open",)
-    # File inserted above the quoted text in a new message or a reply.
+    # Default signature file for accounts without their own line.
     signature: Path | None = None
+    # Per-account signature files: (email, path), last line for an address wins.
+    signatures: tuple[tuple[str, Path], ...] = ()
+
+
+@dataclass(frozen=True)
+class ProfileOverlay:
+    """Optional overrides from ``profiles/<name>``."""
+
+    open_command: tuple[str, ...] | None = None
+    signature: Path | None = None
+    signatures: tuple[tuple[str, Path], ...] = ()
 
 
 def xdg_config_home() -> Path:
@@ -149,11 +161,14 @@ def default_text(path: Path | None = None) -> str:
         "#            on-demand none  → background-fetch every folder\n"
         "# open       program for a link or an HTML part. The URL or file is\n"
         "#            added at the end. Default: xdg-open\n"
-        "#            profiles/<name> beside this file overrides it for\n"
-        "#            gmail-tui --profile <name>. That file is only an open line.\n"
+        "#            profiles/<name> beside this file overrides open and\n"
+        "#            signature for gmail-tui --profile <name>.\n"
         "#            Example: open firefox -P settings\n"
         "# signature  file inserted into a new message or a reply, above any\n"
         "#            quoted text. The file is read when the editor opens.\n"
+        "#            signature PATH                 → default for every account\n"
+        "#            signature user@host PATH       → that account only\n"
+        "#            A profile file may set the same lines; its match wins.\n"
         "#\n"
         f"download {download}\n"
         f"data {data}\n"
@@ -204,6 +219,7 @@ def parse(text: str) -> Settings:
     on_demand: list[str] | None = None
     open_command = ("xdg-open",)
     signature: Path | None = None
+    signatures: list[tuple[str, Path]] = []
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -246,7 +262,11 @@ def parse(text: str) -> Settings:
         elif name == "open":
             open_command = _open_command(value, lineno)
         elif name == "signature":
-            signature = _path(value)
+            email, path = _signature_entry(value, lineno)
+            if email is None:
+                signature = path
+            else:
+                signatures.append((email, path))
         else:
             raise SettingsError(f"line {lineno}: unknown setting {name}")
     if not seen_datetime or datetime_fmt is None:
@@ -264,39 +284,68 @@ def parse(text: str) -> Settings:
         on_demand=tuple(on_demand) if on_demand is not None else DEFAULT_ON_DEMAND,
         open_command=open_command,
         signature=signature,
+        signatures=tuple(signatures),
     )
 
 
 def profile_config_path(settings_file: Path, profile: str) -> Path:
-    """``<config-dir>/profiles/<name>`` — optional ``open`` override for one profile."""
+    """``<config-dir>/profiles/<name>`` — optional overrides for one profile."""
     name = normalize_profile(profile)
     if not name:
         raise SettingsError("profile name is empty")
     return settings_file.parent / "profiles" / name
 
 
-def load_profile_open(path: Path) -> tuple[str, ...] | None:
-    """``open`` command from a profile file. Missing or empty means no override."""
+def load_profile(path: Path) -> ProfileOverlay | None:
+    """Profile overlay. Missing file means no override."""
     if not path.exists():
         return None
-    return parse_profile_open(path.read_text(encoding="utf-8"))
+    return parse_profile(path.read_text(encoding="utf-8"))
 
 
-def parse_profile_open(text: str) -> tuple[str, ...] | None:
-    """The ``open`` line in a profile file. Any other setting is an error."""
+def load_profile_open(path: Path) -> tuple[str, ...] | None:
+    """``open`` command from a profile file. Missing or empty means no override."""
+    overlay = load_profile(path)
+    if overlay is None:
+        return None
+    return overlay.open_command
+
+
+def parse_profile(text: str) -> ProfileOverlay:
+    """``open`` and ``signature`` lines for one profile."""
     command: tuple[str, ...] | None = None
+    signature: Path | None = None
+    signatures: list[tuple[str, Path]] = []
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
         parts = line.split(None, 1)
         if len(parts) != 2:
-            raise SettingsError(f"line {lineno}: expected 'open <command>'")
+            raise SettingsError(f"line {lineno}: expected 'name value'")
         name, value = parts[0], parts[1].strip()
-        if name != "open":
-            raise SettingsError(f"line {lineno}: a profile file only sets open")
-        command = _open_command(value, lineno)
-    return command
+        if name == "open":
+            command = _open_command(value, lineno)
+        elif name == "signature":
+            email, path = _signature_entry(value, lineno)
+            if email is None:
+                signature = path
+            else:
+                signatures.append((email, path))
+        else:
+            raise SettingsError(
+                f"line {lineno}: a profile file only sets open or signature"
+            )
+    return ProfileOverlay(
+        open_command=command,
+        signature=signature,
+        signatures=tuple(signatures),
+    )
+
+
+def parse_profile_open(text: str) -> tuple[str, ...] | None:
+    """The ``open`` line in a profile file (tests and older callers)."""
+    return parse_profile(text).open_command
 
 
 def resolve_open_command(
@@ -308,10 +357,56 @@ def resolve_open_command(
     name = normalize_profile(profile)
     if name is None:
         return settings.open_command
-    overlay = load_profile_open(profile_config_path(settings_file, name))
-    if overlay is None:
+    overlay = load_profile(profile_config_path(settings_file, name))
+    if overlay is None or overlay.open_command is None:
         return settings.open_command
-    return overlay
+    return overlay.open_command
+
+
+def resolve_signature(
+    settings: Settings,
+    settings_file: Path,
+    profile: str | None,
+    email: str | None,
+) -> Path | None:
+    """Signature file for one account in this profile.
+
+    Order: profile account → profile default → shared account → shared default.
+    """
+    key = (email or "").strip().casefold()
+    overlay: ProfileOverlay | None = None
+    name = normalize_profile(profile)
+    if name is not None:
+        overlay = load_profile(profile_config_path(settings_file, name))
+    if overlay is not None:
+        for addr, path in reversed(overlay.signatures):
+            if key and addr.casefold() == key:
+                return path
+        if overlay.signature is not None:
+            return overlay.signature
+    for addr, path in reversed(settings.signatures):
+        if key and addr.casefold() == key:
+            return path
+    return settings.signature
+
+
+def _signature_entry(value: str, lineno: int) -> tuple[str | None, Path]:
+    """``PATH`` or ``user@host PATH`` from a signature line."""
+    parts = value.split(None, 1)
+    if len(parts) == 2 and _looks_like_email(parts[0]):
+        return parts[0], _path(parts[1])
+    if not value:
+        raise SettingsError(f"line {lineno}: signature needs a path")
+    return None, _path(value)
+
+
+def _looks_like_email(token: str) -> bool:
+    if "@" not in token or token.startswith("@") or token.endswith("@"):
+        return False
+    if "/" in token or "\\" in token or "://" in token:
+        return False
+    local, _, domain = token.partition("@")
+    return bool(local) and "." in domain
 
 
 def _open_command(value: str, lineno: int) -> tuple[str, ...]:
