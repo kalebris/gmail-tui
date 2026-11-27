@@ -34,6 +34,8 @@ from gmail_tui.sync import BackgroundSync, Engine, UrgentWork
 from gmail_tui.cal_ui import CalendarDesk, render_calendar, status_calendar
 from gmail_tui.ui import (
     MailSession,
+    load_newest_first,
+    save_newest_first,
     _clip,
     _display_width,
     format_check_age,
@@ -167,18 +169,27 @@ class _SixelPump:
 class _Account:
     """One mailbox and the sync job that keeps running while another account is shown."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, newest_first: bool = True) -> None:
         self.engine = engine
-        self.session = MailSession(engine)
+        self.session = MailSession(engine, newest_first=newest_first)
         self.job = BackgroundSync(engine)
         self.urgent = UrgentWork(engine)
         self.lock = threading.Lock()
 
 
 class _Desk:
-    def __init__(self, jobs: list[_Account], accounts: list[Account]) -> None:
+    def __init__(
+        self,
+        jobs: list[_Account],
+        accounts: list[Account],
+        *,
+        data: Path | None = None,
+        newest_first: bool = True,
+    ) -> None:
         self.jobs = jobs
         self.accounts = accounts
+        self.data = data
+        self.newest_first = newest_first
         self.index = 0
         self.mode = "mail"  # mail | calendar
         self._calendar: CalendarDesk | None = None
@@ -273,10 +284,13 @@ def run_tui(
     desk: _Desk | None = None
     threads: list[threading.Thread] = []
     token_root = accounts[0].root if token else None
+    newest_first = load_newest_first(data)
     try:
         # Open mailboxes in parallel: each does its own SQLite label scan and
         # may refresh OAuth. Serial startup felt multi-second with several large accounts.
-        jobs = _open_accounts(accounts, token_root, token, notice)
+        jobs = _open_accounts(
+            accounts, token_root, token, notice, newest_first=newest_first
+        )
         # Tab badges come from the open sessions, not a second discover scan.
         for tab, slot in zip(accounts, jobs):
             tab.inbox = slot.session.inbox_count
@@ -284,7 +298,7 @@ def run_tui(
             email = slot.engine.store.account_email()
             if email:
                 tab.name = email
-        desk = _Desk(jobs, accounts)
+        desk = _Desk(jobs, accounts, data=data, newest_first=newest_first)
         try:
             supported, cell = probe_terminal()
         except Exception:
@@ -348,13 +362,15 @@ def _open_account(
     token_root: Path | None,
     token: str | None,
     notice: str,
+    *,
+    newest_first: bool = True,
 ) -> _Account:
     try:
         gmail = _gmail_for(account.root, token_root, token)
     except OAuthError as exc:
         gmail = NullGmail()
         notice = str(exc)
-    slot = _Account(Engine.open(account.root, gmail))
+    slot = _Account(Engine.open(account.root, gmail), newest_first=newest_first)
     slot.session.notice = notice
     return slot
 
@@ -364,9 +380,15 @@ def _open_accounts(
     token_root: Path | None,
     token: str | None,
     notice: str,
+    *,
+    newest_first: bool = True,
 ) -> list[_Account]:
     if len(accounts) == 1:
-        return [_open_account(accounts[0], token_root, token, notice)]
+        return [
+            _open_account(
+                accounts[0], token_root, token, notice, newest_first=newest_first
+            )
+        ]
     jobs: list[_Account | None] = [None] * len(accounts)
     errors: list[BaseException] = []
 
@@ -377,6 +399,7 @@ def _open_accounts(
                 token_root,
                 token,
                 notice if index == 0 else "",
+                newest_first=newest_first,
             )
         except BaseException as exc:  # noqa: BLE001 - surface any open failure
             errors.append(exc)
@@ -518,13 +541,20 @@ def _visible(desk: _Desk, slot: _Account) -> bool:
     return desk.jobs[desk.index] is slot
 
 
+def _account_label(tab: Account, slot: _Account) -> str:
+    """Stable name for tab badges and new-mail alerts."""
+    email = slot.engine.store.account_email()
+    if email:
+        tab.name = email
+    return tab.name or "account"
+
+
 def _queue_mail_alert(desk: _Desk, tab: Account, slot: _Account) -> None:
     count = slot.job.mail_alert
     if not count:
         return
     slot.job.mail_alert = 0
-    name = tab.name or slot.engine.store.account_email() or "account"
-    desk.note_mail(name, count)
+    desk.note_mail(_account_label(tab, slot), count)
 
 
 def _remember(desk: _Desk, tab: Account, slot: _Account) -> None:
@@ -535,9 +565,7 @@ def _remember(desk: _Desk, tab: Account, slot: _Account) -> None:
     checked = getattr(slot.job, "checked_at", None)
     if checked is not None:
         tab.checked_at = checked
-    email = slot.engine.store.account_email()
-    if email:
-        tab.name = email
+    _account_label(tab, slot)
     _queue_mail_alert(desk, tab, slot)
 
 
@@ -560,7 +588,8 @@ def _flush_mail_alerts(desk: _Desk, accounts: list[Account]) -> bool:
         return False
     changed = False
     for tab, slot in zip(accounts, desk.jobs):
-        if not counts.get(tab.name):
+        name = _account_label(tab, slot)
+        if not counts.get(name):
             continue
         slot.job.list_bump = False
         slot.job.dirty = False
@@ -582,8 +611,18 @@ def _switch(desk: _Desk, accounts: list[Account], index: int) -> None:
         session.sync_done = arriving.job.done
         session.sync_total = arriving.job.total
         session.sync_tick = arriving.job.tick
-        arriving.job.dirty = False
         arriving.urgent.dirty = False
+        # Shared list order; rebuild if this mailbox still has the old one.
+        if session.newest_first != desk.newest_first:
+            session.newest_first = desk.newest_first
+            session.load_messages(fetch=False, open_reader=False)
+        # Background sync may have marked the list dirty while this tab was
+        # hidden. Refresh before clearing the flag so new mail is not lost.
+        bump = bool(arriving.job.list_bump)
+        if arriving.job.dirty or bump:
+            arriving.job.list_bump = False
+            arriving.job.dirty = False
+            session.refresh_view(pin_new_mail=bump)
         # Each account keeps its own folder, search, and cursors.
         _remember(desk, accounts[index], arriving)
 
@@ -851,6 +890,11 @@ def _loop(
             continue
         if action == "order":
             session.toggle_order()
+            desk.newest_first = session.newest_first
+            save_newest_first(desk.data, desk.newest_first)
+            for slot in desk.jobs:
+                if slot.session is not session:
+                    slot.session.newest_first = desk.newest_first
             continue
         if action == "toggle-unread":
             session.toggle_unread()

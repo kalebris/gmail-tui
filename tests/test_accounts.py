@@ -17,8 +17,10 @@ from gmail_tui.tui import (
     _Account,
     _Desk,
     _account_loop,
+    _flush_mail_alerts,
     _halt,
     _input_timeout,
+    _queue_mail_alert,
     _service,
     _switch,
 )
@@ -215,6 +217,93 @@ class AccountTests(unittest.TestCase):
             finally:
                 for slot in desk.jobs:
                     slot.engine.store.close()
+
+    def test_switch_refreshes_a_dirty_hidden_mailbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "mail"
+            ada = account_root(data, "ada@example.com")
+            Store.open(ada).close()
+            bea = account_root(data, "bea@example.com")
+            other = Store.open(bea)
+            other.set_email("bea@example.com")
+            other.replace_labels(
+                [
+                    Label("INBOX", "INBOX", "system"),
+                    Label("UNREAD", "UNREAD", "system"),
+                ]
+            )
+            self._message(other, "old", ["INBOX"], date=1_000)
+            other.close()
+            accounts = discover(data)
+            desk = _Desk(
+                [
+                    _Account(Engine.open(accounts[0].root, NullGmail())),
+                    _Account(Engine.open(accounts[1].root, NullGmail())),
+                ],
+                accounts,
+            )
+            try:
+                hidden = desk.jobs[1]
+                hidden.session.focus = "list"
+                hidden.session.load_messages(fetch=False)
+                self.assertEqual(
+                    [item.gmail_id for item in hidden.session.messages], ["old"]
+                )
+                store = Store.open(bea)
+                try:
+                    self._message(store, "fresh", ["INBOX", "UNREAD"], date=9_000)
+                finally:
+                    store.close()
+                hidden.job.dirty = True
+                hidden.job.list_bump = True
+                _switch(desk, accounts, 1)
+                self.assertFalse(hidden.job.dirty)
+                self.assertFalse(hidden.job.list_bump)
+                self.assertEqual(
+                    [item.gmail_id for item in desk.session.messages],
+                    ["fresh", "old"],
+                )
+            finally:
+                for slot in desk.jobs:
+                    slot.engine.store.close()
+
+    def test_flush_mail_alerts_uses_the_account_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            store = Store.open(data)
+            store.set_email("ada@example.com")
+            store.replace_labels(
+                [
+                    Label("INBOX", "INBOX", "system"),
+                    Label("UNREAD", "UNREAD", "system"),
+                ]
+            )
+            self._message(store, "m1", ["INBOX"])
+            store.close()
+            tab = Account("", data)
+            desk = _Desk([_Account(Engine.open(data, NullGmail()))], [tab])
+            try:
+                slot = desk.jobs[0]
+                slot.session.focus = "list"
+                slot.session.load_messages(fetch=False)
+                self.assertEqual([item.gmail_id for item in slot.session.messages], ["m1"])
+                store = Store.open(data)
+                try:
+                    self._message(store, "m2", ["INBOX", "UNREAD"], date=9_000)
+                finally:
+                    store.close()
+                slot.job.mail_alert = 1
+                slot.job.dirty = True
+                slot.job.list_bump = True
+                _queue_mail_alert(desk, tab, slot)
+                self.assertEqual(tab.name, "ada@example.com")
+                self.assertTrue(_flush_mail_alerts(desk, [tab]))
+                self.assertEqual(
+                    [item.gmail_id for item in slot.session.messages],
+                    ["m2", "m1"],
+                )
+            finally:
+                desk.engine.store.close()
 
     def test_switch_restores_the_folder_and_search(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,13 +607,20 @@ class AccountTests(unittest.TestCase):
             finally:
                 desk.engine.store.close()
 
-    def _message(self, store: Store, gmail_id: str, labels: list[str]) -> None:
+    def _message(
+        self,
+        store: Store,
+        gmail_id: str,
+        labels: list[str],
+        *,
+        date: int = 1_000,
+    ) -> None:
         store.upsert_metadata(
             IncomingMessage(
                 gmail_id=gmail_id,
                 thread_id=gmail_id,
                 label_ids=labels,
-                internal_date_ms=1_000,
+                internal_date_ms=date,
                 subject=gmail_id,
                 from_addr="ada@example.com",
                 to_addr="me@gmail.com",

@@ -119,8 +119,37 @@ class _ExternalEdit:
         self.reply_to = reply_to
 
 
+def load_newest_first(data: Path | None) -> bool:
+    """Mail list order from ``<data>/order``. Missing file means newest first."""
+    if data is None:
+        return True
+    path = Path(data) / "order"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return True
+    line = ""
+    for piece in raw.splitlines():
+        line = piece.split("#", 1)[0].strip()
+        if line:
+            break
+    key = line.casefold()
+    if key in ("oldest", "oldest-first"):
+        return False
+    return True
+
+
+def save_newest_first(data: Path | None, newest_first: bool) -> None:
+    """Remember the last ``o`` choice under ``<data>/order``."""
+    if data is None:
+        return
+    path = Path(data) / "order"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("newest\n" if newest_first else "oldest\n", encoding="utf-8")
+
+
 class MailSession:
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, newest_first: bool = True) -> None:
         self.engine = engine
         self.focus = "labels"
         self.label_cursor = 0
@@ -247,7 +276,7 @@ class MailSession:
         self.selected: set[str] = set()
         self.account_spans: list[tuple[int, int, int]] = []
         self._selection_scope: str | None = None
-        self.newest_first = True
+        self.newest_first = newest_first
         self.message_window = 10
         self.label_window = 8
         self.reader_window = 8
@@ -381,7 +410,6 @@ class MailSession:
             selected_gmail = selected.gmail_id if selected is not None else ""
             reader_scroll = self.reader_scroll
             kept_messages = self.messages
-            kept_more = self._more
             kept_threads = self._mail_threads
             kept_cursor = self.message_cursor
             kept_row = kept_cursor - self.message_scroll
@@ -392,20 +420,12 @@ class MailSession:
                     if item.gmail_id == label_id:
                         self.label_cursor = index
                         break
+            # Reload from the store (first page + the same depth). Merging the
+            # old in-memory tail kept stale thread heads, so a reply in a
+            # deep conversation stayed invisible until g-i or a folder change.
+            depth = len(kept_threads)
             self.load_messages(fetch=False, open_reader=False)
-            # Prefer the fresh first page so new mail appears. If the open row
-            # was only present after paging further, merge that tail back on
-            # instead of throwing away the update (or the deep window).
-            if kept_messages and _list_index(
-                self.messages, message_id, selected_gmail, thread_id
-            ) is None:
-                self.messages, self._mail_threads, self._more = _merge_mail_page(
-                    self.messages,
-                    self._mail_threads,
-                    kept_messages,
-                    kept_threads,
-                    kept_more,
-                )
+            self._ensure_mail_depth(depth, message_id)
             self._restore_list_cursor(
                 message_id,
                 selected_gmail,
@@ -3496,20 +3516,6 @@ def _list_cursor_for(
     if not messages:
         return 0
     return min(max(0, kept_cursor), len(messages) - 1)
-
-
-def _merge_mail_page(
-    fresh: list[MessageSummary],
-    fresh_threads: list[MessageSummary],
-    kept: list[MessageSummary],
-    kept_threads: list[MessageSummary],
-    kept_more: bool,
-) -> tuple[list[MessageSummary], list[MessageSummary], bool]:
-    """Keep a deep paged window while letting the newest page replace overlaps."""
-    fresh_thread_ids = {item.thread_id for item in fresh}
-    trimmed = [item for item in kept if item.thread_id not in fresh_thread_ids]
-    trimmed_threads = [item for item in kept_threads if item.thread_id not in fresh_thread_ids]
-    return list(fresh) + trimmed, list(fresh_threads) + trimmed_threads, kept_more
 
 
 def _known_mail_ids(messages: list[MessageSummary]) -> set[str]:

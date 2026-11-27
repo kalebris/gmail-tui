@@ -381,7 +381,7 @@ snooze, inbox, help.
 | `d` | delete |
 | `l` | add or remove a label |
 | `u` / `n` | toggle unread / jump to next unread |
-| `o` | newest or oldest first |
+| `o` | newest or oldest first (remembered under the data dir) |
 | `c` | address a new message, then edit it |
 | `C` | open the calendar |
 | `r` / `R` | reply-all / reply |

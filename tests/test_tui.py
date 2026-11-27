@@ -50,11 +50,13 @@ from gmail_tui.ui import (
     format_when,
     geometry,
     help_lines,
+    load_newest_first,
     message_row,
     render_lines,
     parse_draft,
     reader_match,
     reply_draft,
+    save_newest_first,
     status_bar,
     wrap_lines,
 )
@@ -2026,6 +2028,26 @@ class MailboxTests(unittest.TestCase):
         finally:
             engine.store.close()
 
+    def test_mail_order_is_remembered_under_the_data_dir(self) -> None:
+        data = Path(self.tmp.name)
+        self.assertTrue(load_newest_first(data))
+        self.assertTrue(load_newest_first(None))
+        save_newest_first(data, False)
+        self.assertEqual((data / "order").read_text(encoding="utf-8"), "oldest\n")
+        self.assertFalse(load_newest_first(data))
+        save_newest_first(data, True)
+        self.assertEqual((data / "order").read_text(encoding="utf-8"), "newest\n")
+        self.assertTrue(load_newest_first(data))
+        (data / "order").write_text("# comment\noldest-first\n", encoding="utf-8")
+        self.assertFalse(load_newest_first(data))
+        engine = Engine.open(data, NullGmail())
+        try:
+            session = MailSession(engine, newest_first=load_newest_first(data))
+            self.assertFalse(session.newest_first)
+            self.assertEqual([item.subject for item in session.messages], ["Second", "First"])
+        finally:
+            engine.store.close()
+
     def test_order_key_keeps_pages_already_loaded(self) -> None:
         import gmail_tui.ui as ui
 
@@ -2260,6 +2282,66 @@ class MailboxTests(unittest.TestCase):
             session.refresh_view()
             self.assertEqual(session.messages[0].subject, "Top new")
             self.assertEqual(session.messages[session.message_cursor].gmail_id, deep)
+        finally:
+            ui.PAGE = previous
+            engine.store.close()
+
+    def test_refresh_view_shows_a_reply_in_a_deep_thread(self) -> None:
+        """A reply off the first page must update the head without g-i."""
+        for number in range(5):
+            self._message(
+                f"deep{number}",
+                f"td{number}",
+                4_000 + number,
+                f"Deep {number}",
+                "Ada <ada@example.com>",
+                "me@gmail.com",
+                ["INBOX"],
+                "body",
+            )
+        import gmail_tui.ui as ui
+
+        previous = ui.PAGE
+        ui.PAGE = 2
+        engine = Engine.open(self.tmp.name, NullGmail())
+        try:
+            session = MailSession(engine, newest_first=False)
+            session.focus = "list"
+            while session._more:
+                session._fill_page(force=True)
+            # Oldest first: last row is the newest of the seeded set (Deep 4).
+            session.message_cursor = next(
+                index
+                for index, item in enumerate(session.messages)
+                if item.gmail_id == "deep4"
+            )
+            held = session.messages[session.message_cursor]
+            self.assertEqual(held.thread_count, 1)
+            self._message(
+                "deep4-reply",
+                "td4",
+                4_500,
+                "Re: Deep 4",
+                "Cy <cy@example.com>",
+                "me@gmail.com",
+                ["INBOX", "UNREAD"],
+                "reply",
+            )
+            session.refresh_view()
+            head = next(item for item in session.messages if item.thread_id == held.thread_id)
+            self.assertGreaterEqual(head.thread_count, 2)
+            self.assertIn("deep4-reply", head.member_ids)
+            self.assertEqual(
+                session.messages[session.message_cursor].thread_id, held.thread_id
+            )
+            session.expanded_threads.add(held.thread_id)
+            session._show_threads()
+            children = [
+                item
+                for item in session.messages
+                if item.thread_id == held.thread_id and item.thread_role == "child"
+            ]
+            self.assertTrue(any(item.gmail_id == "deep4-reply" for item in children))
         finally:
             ui.PAGE = previous
             engine.store.close()
